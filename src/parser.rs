@@ -119,7 +119,6 @@ named!(pub vqa_header<VQAHeader>,
 
 #[derive(Debug)]
 pub struct FINFChunk {
-    pub size: u32,
     pub offsets: Vec<u32>
 }
 
@@ -129,8 +128,23 @@ named!(pub finf_chunk<FINFChunk>,
         size: be_u32 >>
         offsets: many_m_n!(size as usize / 4, size as usize / 4, le_u32) >>
         (FINFChunk {
-            size: size,
             offsets: offsets
+        })
+    )
+);
+
+#[derive(Debug)]
+pub struct SND2Chunk<'a> {
+    pub data: &'a [u8]
+}
+
+named!(pub snd2_chunk<SND2Chunk>,
+    do_parse!(
+        tag!("SND2")       >>
+        size: be_u32       >>
+        data: take!(size)  >>
+        (SND2Chunk {
+            data: data
         })
     )
 );
