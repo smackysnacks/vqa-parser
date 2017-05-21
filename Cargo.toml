@@ -1,0 +1,7 @@
+[package]
+name = "vqa-parser"
+version = "0.1.0"
+authors = ["Mack Stump <mack.stump@gmail.com>"]
+
+[dependencies]
+nom = "3"
