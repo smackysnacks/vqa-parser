@@ -38,10 +38,16 @@ named!(pub vqa_version<VQAVersion>,
     )
 );
 
+bitflags! {
+    pub struct VQAFlags: u16 {
+        const HAS_SOUND = 0b00000001;
+    }
+}
+
 #[derive(Debug)]
 pub struct VQAHeader {
     pub version       : VQAVersion, // VQA version number
-    pub flags         : u16,        // VQA flags
+    pub flags         : VQAFlags,   // VQA flags
     pub num_frames    : u16,        // Number of frames
     pub width         : u16,        // Movie width (pixels)
     pub height        : u16,        // Movie height (pixels)
@@ -88,7 +94,7 @@ named!(pub vqa_header<VQAHeader>,
         unk5: le_u32              >>
         (VQAHeader {
             version: version,
-            flags: flags,
+            flags: VQAFlags::from_bits_truncate(flags),
             num_frames: num_frames,
             width: width,
             height: height,
