@@ -6,7 +6,7 @@
 //! * https://wiki.multimedia.cx/index.php/VQA#Technical_Description
 //! * https://multimedia.cx/HC-VQA.TXT
 
-use nom::{be_u32, le_u8, le_u16, le_u32, IResult};
+use nom::{be_u32, le_u8, le_u16, le_u32};
 
 #[derive(Debug)]
 pub struct FormChunk {
