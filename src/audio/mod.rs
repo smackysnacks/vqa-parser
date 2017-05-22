@@ -11,36 +11,57 @@ const STEP_TABLE: [u32; 89] = [
     16818, 18500, 20350, 22385, 24623, 27086,  29794, 32767
 ];
 
-const INDEX_ADJUSTMENT: [i32; 8] = [
+const INDEX_ADJUSTMENT: [i32; 16] = [
+    -1, -1, -1, -1, 2, 4, 6, 8,
     -1, -1, -1, -1, 2, 4, 6, 8
 ];
 
+pub struct CodecState {
+    sample: i32,
+    index: i32
+}
+
+impl CodecState {
+    pub fn new() -> CodecState {
+        CodecState {
+            sample: 0,
+            index: 0
+        }
+    }
+}
+
 /// Decompress samples of a _single_ audio channel.
 ///
-/// First call to this function should pass in 0 for `index` and 0 for `sample`.
-/// Subsequent calls should maintain `index` and `sample` for a single channel.
-pub fn decompress(input: &[u8], index: &mut i32, sample: &mut i32) -> Box<[u16]> {
+/// Pass in a separate `state` for each channel
+pub fn decompress(state: &mut CodecState, input: &[u8]) -> Box<[u16]> {
     let mut buffer = Vec::with_capacity(input.len() * 2);
+    let mut low_nibble = true;
+    let mut i = 0;
 
-    for i in 0..input.len() {
-        for c in [input[i] & 0b0000_1111, input[i] & 0b1111_0000].iter() {
-            let mut code = *c;
+    while i < input.len() {
+        let mut code;
+        if low_nibble {
+            code = input[i] & 0xf;
+        } else {
+            code = (input[i] >> 4) & 0xf;
+            i += 1;
+        };
+        low_nibble = !low_nibble;
 
-            let sb = if code & 0x8 != 0 { 1 } else { 0 };
-            code = code & 0x7;
-            let mut delta = ((STEP_TABLE[*index as usize]*code as u32) / 4 + STEP_TABLE[*index as usize] / 8) as i32;
-            if sb == 1 { delta = -delta; }
+        let sb = if code & 0x8 != 0 { 1 } else { 0 };
+        code = code & 0x7;
+        let mut delta = ((STEP_TABLE[state.index as usize]*code as u32) / 4 + STEP_TABLE[state.index as usize] / 8) as i32;
+        if sb == 1 { delta = -delta; }
 
-            *sample = *sample + delta;
-            if *sample > 32767 { *sample = 32767; }
-            else if *sample < -32768 { *sample = -32768; }
+        state.sample = state.sample + delta;
+        if state.sample > 32767 { state.sample = 32767; }
+        else if state.sample < -32768 { state.sample = -32768; }
 
-            buffer.push(*sample as u16);
+        buffer.push(state.sample as u16);
 
-            *index = *index + INDEX_ADJUSTMENT[code as usize];
-            if *index < 0 { *index = 0; }
-            else if *index > 88 { *index = 88; }
-        }
+        state.index = state.index + INDEX_ADJUSTMENT[code as usize];
+        if state.index < 0 { state.index = 0; }
+        else if state.index > 88 { state.index = 88; }
     }
 
     buffer.into_boxed_slice()
