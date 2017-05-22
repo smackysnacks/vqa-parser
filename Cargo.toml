@@ -6,3 +6,6 @@ authors = ["Mack Stump <mack.stump@gmail.com>"]
 [dependencies]
 bitflags = "0.9"
 nom = "3"
+
+[dev-dependencies]
+portaudio = "0.7.0"
