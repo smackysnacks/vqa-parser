@@ -38,30 +38,33 @@ pub fn decompress(state: &mut CodecState, input: &[u8]) -> Box<[u16]> {
     let mut low_nibble = true;
     let mut i = 0;
 
+    let mut step = STEP_TABLE[state.index as usize];
     while i < input.len() {
-        let mut code;
+        let mut nibble: u8;
         if low_nibble {
-            code = input[i] & 0xf;
+            nibble = input[i] & 0xf;
         } else {
-            code = (input[i] >> 4) & 0xf;
+            nibble = (input[i] >> 4) & 0xf;
             i += 1;
         };
         low_nibble = !low_nibble;
 
-        let sb = if code & 0x8 != 0 { 1 } else { 0 };
-        code &= 0x7;
-        let mut delta = ((STEP_TABLE[state.index as usize]*code as u32) / 4 + STEP_TABLE[state.index as usize] / 8) as i32;
-        if sb == 1 { delta = -delta; }
-
-        state.sample += delta;
-        if state.sample > 32767 { state.sample = 32767; }
-        else if state.sample < -32768 { state.sample = -32768; }
-
-        buffer.push(state.sample as u16);
-
-        state.index += INDEX_ADJUSTMENT[code as usize];
+        state.index += INDEX_ADJUSTMENT[nibble as usize];
         if state.index < 0 { state.index = 0; }
         else if state.index > 88 { state.index = 88; }
+        let sign = nibble & 8;
+        let delta = nibble & 7;
+        let mut diff = step >> 3;
+        if delta & 4 == 4 { diff += step; }
+        if delta & 2 == 2 { diff += step >> 1; }
+        if delta & 1 == 1 { diff += step >> 2; }
+        if sign == 8 { state.sample -= diff as i32; }
+        else { state.sample += diff as i32; }
+        if state.sample < -32768 { state.sample = -32768; }
+        else if state.sample > 32767 { state.sample = 32767; }
+        step = STEP_TABLE[state.index as usize];
+
+        buffer.push(state.sample as u16);
     }
 
     buffer.into_boxed_slice()
