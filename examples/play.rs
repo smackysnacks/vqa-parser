@@ -1,13 +1,15 @@
 #[macro_use] extern crate nom;
-extern crate vqa_parser;
 extern crate portaudio;
+extern crate vqa_parser;
 
+use portaudio::PortAudio;
+use vqa_parser::audio::CodecState;
 use vqa_parser::{VQAHeader, SND2Chunk};
 use vqa_parser::{form_chunk, vqa_header, snd2_chunk};
-use vqa_parser::audio::CodecState;
-use portaudio::PortAudio;
 
 use std::collections::VecDeque;
+use std::fs::File;
+use std::io::Read;
 
 named!(parse_vqaheader<VQAHeader>,
     do_parse!(
@@ -35,14 +37,20 @@ named!(all_snd2_chunks<Vec<SND2Chunk>>,
 );
 
 fn main() {
-    let vqa_wwlogo = include_bytes!("wwlogo.vqa");
+    let mut args = std::env::args();
+    if args.len() != 2 {
+        println!("usage: {} <vqa file>", args.nth(0).unwrap());
+        return;
+    }
 
-    let vqa = parse_vqaheader(vqa_wwlogo).unwrap().1;
-    let snd2_chunks = all_snd2_chunks(vqa_wwlogo).unwrap().1;
+    let mut input = File::open(args.nth(1).unwrap()).expect("Failed to open file");
+    let mut buffer = Vec::new();
+    input.read_to_end(&mut buffer).expect("Failed to read file");
+
+    let vqa = parse_vqaheader(&buffer).unwrap().1;
+    let snd2_chunks = all_snd2_chunks(&buffer).unwrap().1;
 
     println!("{:#?}", vqa);
-    println!("parsed {} snd2 chunks", snd2_chunks.len());
-
     play_chunks(&snd2_chunks);
 }
 
