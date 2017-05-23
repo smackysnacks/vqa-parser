@@ -98,7 +98,13 @@ fn play_chunks(chunks: &Vec<SND2Chunk>) {
     let mut stream = pa.open_non_blocking_stream(settings, callback).unwrap();
 
     stream.start().unwrap();
-    pa.sleep(10 * 1_000);
+    while let Ok(active) = stream.is_active() {
+        if active {
+            pa.sleep(50); // sleep 50ms
+        } else {
+            break;
+        }
+    }
     stream.stop().unwrap();
     stream.close().unwrap();
 }
