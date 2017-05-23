@@ -30,7 +30,7 @@ impl CodecState {
     }
 }
 
-/// Decompress samples of a _single_ audio channel.
+/// Decompress samples of a _single_ audio channel using the IMA ADPCM algorithm.
 ///
 /// Pass in a separate `state` for each channel
 pub fn decompress(state: &mut CodecState, input: &[u8]) -> Box<[u16]> {
