@@ -54,7 +54,7 @@ fn main() {
     play_chunks(&snd2_chunks);
 }
 
-fn get_samples(chunks: &Vec<SND2Chunk>) -> VecDeque<i16> {
+fn get_samples(chunks: &[SND2Chunk]) -> VecDeque<i16> {
     let mut samples = VecDeque::new();
 
     let mut ch1_state = CodecState::new();
@@ -73,7 +73,7 @@ fn get_samples(chunks: &Vec<SND2Chunk>) -> VecDeque<i16> {
     samples
 }
 
-fn play_chunks(chunks: &Vec<SND2Chunk>) {
+fn play_chunks(chunks: &[SND2Chunk]) {
     const CHANNELS: i32 = 2;
     const SAMPLE_RATE: f64 = 22050.0;
     const FRAMES_PER_BUFFER: u32 = 256;
@@ -89,17 +89,17 @@ fn play_chunks(chunks: &Vec<SND2Chunk>) {
     let callback = move |portaudio::OutputStreamCallbackArgs { buffer, frames, .. }| {
         let mut idx = 0;
         for _ in 0..frames {
-            if sampledata.len() > 0 {
+            if !sampledata.is_empty() {
                 buffer[idx]   = sampledata.pop_front().unwrap();
                 buffer[idx+1] = sampledata.pop_front().unwrap();
             }
             idx += 2;
         }
 
-        if sampledata.len() == 0 {
-            return portaudio::Complete;
+        if sampledata.is_empty() {
+            portaudio::Complete
         } else {
-            return portaudio::Continue;
+            portaudio::Continue
         }
     };
 

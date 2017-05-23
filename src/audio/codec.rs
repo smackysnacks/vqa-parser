@@ -49,17 +49,17 @@ pub fn decompress(state: &mut CodecState, input: &[u8]) -> Box<[u16]> {
         low_nibble = !low_nibble;
 
         let sb = if code & 0x8 != 0 { 1 } else { 0 };
-        code = code & 0x7;
+        code &= 0x7;
         let mut delta = ((STEP_TABLE[state.index as usize]*code as u32) / 4 + STEP_TABLE[state.index as usize] / 8) as i32;
         if sb == 1 { delta = -delta; }
 
-        state.sample = state.sample + delta;
+        state.sample += delta;
         if state.sample > 32767 { state.sample = 32767; }
         else if state.sample < -32768 { state.sample = -32768; }
 
         buffer.push(state.sample as u16);
 
-        state.index = state.index + INDEX_ADJUSTMENT[code as usize];
+        state.index += INDEX_ADJUSTMENT[code as usize];
         if state.index < 0 { state.index = 0; }
         else if state.index > 88 { state.index = 88; }
     }
