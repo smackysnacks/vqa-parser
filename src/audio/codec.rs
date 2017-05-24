@@ -38,9 +38,9 @@ pub fn decompress(state: &mut CodecState, input: &[u8]) -> Box<[u16]> {
     let mut low_nibble = true;
     let mut i = 0;
 
-    let mut step = STEP_TABLE[state.index as usize];
+    let mut step = *unsafe { STEP_TABLE.get_unchecked(state.index as usize) };
     while i < input.len() {
-        let mut nibble: u8;
+        let nibble: u8;
         if low_nibble {
             nibble = input[i] & 0xf;
         } else {
@@ -49,7 +49,7 @@ pub fn decompress(state: &mut CodecState, input: &[u8]) -> Box<[u16]> {
         };
         low_nibble = !low_nibble;
 
-        state.index += INDEX_ADJUSTMENT[nibble as usize];
+        state.index += *unsafe { INDEX_ADJUSTMENT.get_unchecked(nibble as usize) };
         if state.index < 0 { state.index = 0; }
         else if state.index > 88 { state.index = 88; }
         let sign = nibble & 8;
@@ -62,7 +62,7 @@ pub fn decompress(state: &mut CodecState, input: &[u8]) -> Box<[u16]> {
         else { state.sample += diff as i32; }
         if state.sample < -32768 { state.sample = -32768; }
         else if state.sample > 32767 { state.sample = 32767; }
-        step = STEP_TABLE[state.index as usize];
+        step = *unsafe { STEP_TABLE.get_unchecked(state.index as usize) };
 
         buffer.push(state.sample as u16);
     }
