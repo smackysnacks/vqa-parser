@@ -143,3 +143,21 @@ named!(pub snd2_chunk<SND2Chunk>,
         })
     )
 );
+
+#[derive(Debug)]
+pub struct VQFRChunk<'a> {
+    pub size: u32,
+    pub data: &'a [u8]
+}
+
+named!(pub vqfr_chunk<VQFRChunk>,
+    do_parse!(
+        tag!("VQFR")      >>
+        size: be_u32      >>
+        data: take!(size) >>
+        (VQFRChunk {
+            size: size,
+            data: data
+        })
+    )
+);
