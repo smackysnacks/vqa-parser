@@ -165,3 +165,27 @@ named!(pub vqfr_chunk<VQFRChunk>,
         })
     )
 );
+
+#[derive(Debug)]
+pub struct CBFChunk<'a> {
+    pub size: u32,
+    pub compressed: bool,
+    pub data: &'a [u8]
+}
+
+named!(pub cbf_chunk<CBFChunk>,
+    do_parse!(
+        tag!("CBF")                      >>
+        compressed: alt!(
+            tag!("0") => { |_| false } |
+            tag!("Z") => { |_| true  }
+        )                                >>
+        size: be_u32                     >>
+        data: take!(size)                >>
+        (CBFChunk {
+            size: size,
+            compressed: compressed,
+            data: data
+        })
+    )
+);
