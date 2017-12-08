@@ -1,8 +1,7 @@
+extern crate cpal;
 #[macro_use] extern crate nom;
-extern crate portaudio;
 extern crate vqa_parser;
 
-use portaudio::PortAudio;
 use vqa_parser::audio::CodecState;
 use vqa_parser::{VQAHeader, SND2Chunk};
 use vqa_parser::{form_chunk, vqa_header, snd2_chunk};
@@ -74,45 +73,26 @@ fn get_samples(chunks: &[SND2Chunk]) -> VecDeque<i16> {
 }
 
 fn play_chunks(chunks: &[SND2Chunk]) {
-    const CHANNELS: i32 = 2;
-    const SAMPLE_RATE: f64 = 22050.0;
-    const FRAMES_PER_BUFFER: u32 = 256;
-
-    let pa = PortAudio::new().unwrap();
-    let settings = pa.default_output_stream_settings(CHANNELS, SAMPLE_RATE, FRAMES_PER_BUFFER).unwrap();
+    let format = cpal::Format {
+        channels: vec![cpal::ChannelPosition::FrontLeft, cpal::ChannelPosition::FrontRight],
+        samples_rate: cpal::SamplesRate(22050),
+        data_type: cpal::SampleFormat::I16,
+    };
 
     let mut sampledata = get_samples(chunks);
 
-    // This routine will be called by the PortAudio engine when audio is needed. It may called at
-    // interrupt level on some machines so don't do anything that could mess up the system like
-    // dynamic resource allocation or IO.
-    let callback = move |portaudio::OutputStreamCallbackArgs { buffer, frames, .. }| {
-        let mut idx = 0;
-        for _ in 0..frames {
-            if !sampledata.is_empty() {
-                buffer[idx]   = sampledata.pop_front().unwrap();
-                buffer[idx+1] = sampledata.pop_front().unwrap();
+    let endpoint = cpal::default_endpoint().expect("Failed to get default endpoint");
+    let event_loop = cpal::EventLoop::new();
+    let voice_id = event_loop.build_voice(&endpoint, &format).unwrap();
+    event_loop.play(voice_id);
+
+    event_loop.run(move |_, buffer| {
+        if let cpal::UnknownTypeBuffer::I16(mut buffer) = buffer {
+            for sample in buffer.chunks_mut(2) {
+                for out in sample.iter_mut() {
+                    *out = sampledata.pop_front().unwrap_or_else(|| std::process::exit(0));
+                }
             }
-            idx += 2;
         }
-
-        if sampledata.is_empty() {
-            portaudio::Complete
-        } else {
-            portaudio::Continue
-        }
-    };
-
-    let mut stream = pa.open_non_blocking_stream(settings, callback).unwrap();
-
-    stream.start().unwrap();
-    while let Ok(active) = stream.is_active() {
-        if active {
-            pa.sleep(50); // sleep 50ms
-        } else {
-            break;
-        }
-    }
-    stream.stop().unwrap();
-    stream.close().unwrap();
+    });
 }

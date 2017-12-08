@@ -8,4 +8,4 @@ bitflags = "0.9"
 nom = "3"
 
 [dev-dependencies]
-portaudio = "0.7.0"
+cpal = "0.5"
