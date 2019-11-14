@@ -8,4 +8,4 @@ bitflags = "0.9"
 nom = "3"
 
 [dev-dependencies]
-cpal = "0.5"
+cpal = "0.10"
