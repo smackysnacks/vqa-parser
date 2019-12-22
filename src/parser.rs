@@ -1,13 +1,13 @@
 //! The `parser` module contains structures and functions for parsing the VQA
 //! (Vector Quantized Animation) format.
 
-use nom::number::complete::{be_u32, le_u8, le_u16, le_u32};
-use nom::{named, do_parse, tag, alt, take, switch, many_m_n, value};
 use bitflags::bitflags;
+use nom::number::complete::{be_u32, le_u16, le_u32, le_u8};
+use nom::{alt, do_parse, many_m_n, named, switch, tag, take, value};
 
 #[derive(Debug)]
 pub struct FormChunk {
-    pub size: u32
+    pub size: u32,
 }
 
 named!(pub form_chunk<FormChunk>,
@@ -24,7 +24,7 @@ named!(pub form_chunk<FormChunk>,
 pub enum VQAVersion {
     One,
     Two,
-    Three
+    Three,
 }
 
 named!(pub vqa_version<VQAVersion>,
@@ -43,26 +43,26 @@ bitflags! {
 
 #[derive(Debug)]
 pub struct VQAHeader {
-    pub version       : VQAVersion, // VQA version number
-    pub flags         : VQAFlags,   // VQA flags
-    pub num_frames    : u16,        // Number of frames
-    pub width         : u16,        // Movie width (pixels)
-    pub height        : u16,        // Movie height (pixels)
-    pub block_width   : u8,         // Width of each image block (pixels)
-    pub block_height  : u8,         // Height of each image block (pixels)
-    pub frame_rate    : u8,         // Frame rate of the VQA
-    pub cbparts       : u8,         // How many images use the same lookup table
-    pub colors        : u16,        // Max number of colors used in VQA
-    pub maxblocks     : u16,        // Max number of image blocks
-    pub unk1          : u32,        // Always 0?
-    pub unk2          : u16,        // Some kind of size?
-    pub freq          : u16,        // Sound sampling frequency
-    pub channels      : u8,         // Number of sound channels
-    pub bits          : u8,         // Sound resolution
-    pub unk3          : u32,        // Always 0?
-    pub unk4          : u16,        // 0 in old VQAs, 4 in HiColor VQAs?
-    pub max_cbfz_size : u32,        // 0 in old VQAs, CBFZ size in HiColor
-    pub unk5          : u32,        // Always 0?
+    pub version: VQAVersion, // VQA version number
+    pub flags: VQAFlags,     // VQA flags
+    pub num_frames: u16,     // Number of frames
+    pub width: u16,          // Movie width (pixels)
+    pub height: u16,         // Movie height (pixels)
+    pub block_width: u8,     // Width of each image block (pixels)
+    pub block_height: u8,    // Height of each image block (pixels)
+    pub frame_rate: u8,      // Frame rate of the VQA
+    pub cbparts: u8,         // How many images use the same lookup table
+    pub colors: u16,         // Max number of colors used in VQA
+    pub maxblocks: u16,      // Max number of image blocks
+    pub unk1: u32,           // Always 0?
+    pub unk2: u16,           // Some kind of size?
+    pub freq: u16,           // Sound sampling frequency
+    pub channels: u8,        // Number of sound channels
+    pub bits: u8,            // Sound resolution
+    pub unk3: u32,           // Always 0?
+    pub unk4: u16,           // 0 in old VQAs, 4 in HiColor VQAs?
+    pub max_cbfz_size: u32,  // 0 in old VQAs, CBFZ size in HiColor
+    pub unk5: u32,           // Always 0?
 }
 
 named!(pub vqa_header<VQAHeader>,
@@ -117,7 +117,7 @@ named!(pub vqa_header<VQAHeader>,
 #[derive(Debug)]
 pub struct FINFChunk {
     pub size: u32,
-    pub offsets: Vec<u32>
+    pub offsets: Vec<u32>,
 }
 
 named!(pub finf_chunk<FINFChunk>,
@@ -135,7 +135,7 @@ named!(pub finf_chunk<FINFChunk>,
 #[derive(Debug)]
 pub struct SND2Chunk<'a> {
     pub size: u32,
-    pub data: &'a [u8]
+    pub data: &'a [u8],
 }
 
 named!(pub snd2_chunk<SND2Chunk>,
@@ -153,7 +153,7 @@ named!(pub snd2_chunk<SND2Chunk>,
 #[derive(Debug)]
 pub struct VQFRChunk<'a> {
     pub size: u32,
-    pub data: &'a [u8]
+    pub data: &'a [u8],
 }
 
 named!(pub vqfr_chunk<VQFRChunk>,
@@ -172,7 +172,7 @@ named!(pub vqfr_chunk<VQFRChunk>,
 pub struct CBFChunk<'a> {
     pub size: u32,
     pub compressed: bool,
-    pub data: &'a [u8]
+    pub data: &'a [u8],
 }
 
 named!(pub cbf_chunk<CBFChunk>,

@@ -1,4 +1,4 @@
-pub mod parser;
 pub mod audio;
+pub mod parser;
 
 pub use parser::*;
