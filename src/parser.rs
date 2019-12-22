@@ -1,7 +1,9 @@
 //! The `parser` module contains structures and functions for parsing the VQA
 //! (Vector Quantized Animation) format.
 
-use nom::{be_u32, le_u8, le_u16, le_u32};
+use nom::number::complete::{be_u32, le_u8, le_u16, le_u32};
+use nom::{named, do_parse, tag, alt, take, switch, many_m_n, value};
+use bitflags::bitflags;
 
 #[derive(Debug)]
 pub struct FormChunk {
