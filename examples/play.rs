@@ -4,24 +4,35 @@ use vqa_parser::{SND2Chunk, VQAHeader};
 
 use cpal::traits::{EventLoopTrait, HostTrait};
 
-use nom::{do_parse, many0, named, tag, take_until};
+use nom::bytes::complete::{tag, take_until};
+use nom::multi::many0;
+use nom::IResult;
 
 use cpal::StreamData;
 use std::collections::VecDeque;
 use std::fs::File;
 use std::io::Read;
 
-named!(
-    parse_vqaheader<VQAHeader>,
-    do_parse!(form_chunk >> tag!("WVQA") >> vqaheader: vqa_header >> (vqaheader))
-);
+fn parse_vqaheader(input: &[u8]) -> IResult<&[u8], VQAHeader> {
+    let (input, _) = form_chunk(input)?;
+    let (input, _) = tag(b"WVQA")(input)?;
+    let (input, vqaheader) = vqa_header(input)?;
 
-named!(
-    next_snd2_chunk<SND2Chunk>,
-    do_parse!(take_until!("SND2") >> chunk: snd2_chunk >> (chunk))
-);
+    Ok((input, vqaheader))
+}
 
-named!(all_snd2_chunks<Vec<SND2Chunk>>, many0!(next_snd2_chunk));
+fn next_snd2_chunk(input: &[u8]) -> IResult<&[u8], SND2Chunk> {
+    let (input, _) = take_until("SND2")(input)?;
+    let (input, chunk) = snd2_chunk(input)?;
+
+    Ok((input, chunk))
+}
+
+fn all_snd2_chunks(input: &[u8]) -> IResult<&[u8], Vec<SND2Chunk>> {
+    let (input, chunks) = many0(next_snd2_chunk)(input)?;
+
+    Ok((input, chunks))
+}
 
 fn main() {
     let mut args = std::env::args();
