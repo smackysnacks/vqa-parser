@@ -15,7 +15,7 @@ use std::io::Read;
 
 fn parse_vqaheader(input: &[u8]) -> IResult<&[u8], VQAHeader> {
     let (input, _) = form_chunk(input)?;
-    let (input, _) = tag(b"WVQA")(input)?;
+    let (input, _) = tag("WVQA")(input)?;
     let (input, vqaheader) = vqa_header(input)?;
 
     Ok((input, vqaheader))
