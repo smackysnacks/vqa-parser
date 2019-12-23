@@ -29,14 +29,14 @@ jobs:
     - name: Cache cargo build
       uses: actions/cache@v1
       with:
-        path: ./portal-api/target
+        path: ./target
         key: ${{ runner.os }}-cargo-build-target-${{ hashFiles('**/Cargo.lock') }}
 
     - name: Build
       run: cargo build --verbose
-      working-directory: ./portal-api
+      working-directory: .
 
     - name: Run tests
       run: cargo test --verbose
-      working-directory: ./portal-api
+      working-directory: .
 
