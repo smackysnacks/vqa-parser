@@ -22,6 +22,12 @@ impl CodecState {
     }
 }
 
+impl Default for CodecState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Decompress samples of a _single_ audio channel using the IMA ADPCM algorithm.
 ///
 /// Pass in a separate `state` for each channel
