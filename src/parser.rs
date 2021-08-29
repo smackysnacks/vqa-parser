@@ -5,8 +5,8 @@ use bitflags::bitflags;
 use nom::{
     branch::alt,
     bytes::complete::{tag, take},
+    combinator::map_opt,
     combinator::value,
-    error::{make_error, ErrorKind},
     multi::count,
     number::complete::{be_u32, le_u16, le_u32, le_u8},
     IResult,
@@ -32,15 +32,12 @@ pub enum VQAVersion {
 }
 
 pub fn vqa_version(input: &[u8]) -> IResult<&[u8], VQAVersion> {
-    let (new_input, n) = le_u16(input)?;
-    let version = match n {
-        1 => VQAVersion::One,
-        2 => VQAVersion::Two,
-        3 => VQAVersion::Three,
-        _ => return Err(nom::Err::Error(make_error(input, ErrorKind::Switch))),
-    };
-
-    Ok((new_input, version))
+    map_opt(le_u16, |n| match n {
+        1 => Some(VQAVersion::One),
+        2 => Some(VQAVersion::Two),
+        3 => Some(VQAVersion::Three),
+        _ => None,
+    })(input)
 }
 
 bitflags! {
