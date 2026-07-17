@@ -43,6 +43,27 @@ coverage:
 lint:
     cargo clippy --workspace --tests
 
+# Fuzz a cargo-fuzz target (parser | adpcm); extra args go to libFuzzer, e.g. `just fuzz parser -max_total_time=60`
+fuzz target="parser" *args:
+    #!/usr/bin/env bash
+    if ! command -v cargo-fuzz >/dev/null; then
+        echo "cargo-fuzz not found. You can install it by running: cargo install cargo-fuzz"
+        exit 1
+    fi
+    if ! rustup toolchain list | grep -q '^nightly'; then
+        echo "cargo-fuzz needs a nightly toolchain. You can install one by running: rustup toolchain install nightly"
+        exit 1
+    fi
+    # Seed the parser corpus with the bundled sample movie
+    if [ "$1" = "parser" ] && [ ! -e fuzz/corpus/parser/wwlogo.vqa ]; then
+        mkdir -p fuzz/corpus/parser
+        cp examples/wwlogo.vqa fuzz/corpus/parser/
+    fi
+    # Pass the host triple explicitly: cargo-fuzz defaults to the triple it
+    # was itself built for (e.g. musl), which breaks ASan on a gnu host
+    host=$(rustc +nightly -vV | sed -n 's/^host: //p')
+    cargo +nightly fuzz run "$1" --target "$host" -- "${@:2}"
+
 # Scan Cargo.lock for known vulnerabilities in dependencies
 audit:
     #!/usr/bin/env bash

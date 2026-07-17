@@ -1,0 +1,28 @@
+[package]
+name = "vqa-parser-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2018"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.vqa-parser]
+path = ".."
+
+[[bin]]
+name = "parser"
+path = "fuzz_targets/parser.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "adpcm"
+path = "fuzz_targets/adpcm.rs"
+test = false
+doc = false
+bench = false
