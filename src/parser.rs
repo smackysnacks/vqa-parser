@@ -9,7 +9,7 @@ use nom::{
     combinator::value,
     multi::count,
     number::complete::{be_u32, le_u16, le_u32, le_u8},
-    IResult,
+    IResult, Parser,
 };
 
 #[derive(Debug)]
@@ -18,7 +18,7 @@ pub struct FormChunk {
 }
 
 pub fn form_chunk(input: &[u8]) -> IResult<&[u8], FormChunk> {
-    let (input, _) = tag("FORM")(input)?;
+    let (input, _) = tag("FORM").parse(input)?;
     let (input, size) = be_u32(input)?;
 
     Ok((input, FormChunk { size }))
@@ -37,10 +37,12 @@ pub fn vqa_version(input: &[u8]) -> IResult<&[u8], VQAVersion> {
         2 => Some(VQAVersion::Two),
         3 => Some(VQAVersion::Three),
         _ => None,
-    })(input)
+    })
+    .parse(input)
 }
 
 bitflags! {
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub struct VQAFlags: u16 {
         const HAS_SOUND = 0b00000001;
     }
@@ -89,9 +91,9 @@ pub struct VQAHeader {
     pub unk5: u32, // Always 0?
 }
 
-pub fn vqa_header2(input: &[u8]) -> IResult<&[u8], VQAHeader> {
-    let (input, _) = tag(b"VQHD")(input)?;
-    let (input, _) = tag(b"\x00\x00\x00\x2a")(input)?; // VQAHeader is always 42 bytes long
+pub fn vqa_header(input: &[u8]) -> IResult<&[u8], VQAHeader> {
+    let (input, _) = tag(&b"VQHD"[..]).parse(input)?;
+    let (input, _) = tag(&b"\x00\x00\x00\x2a"[..]).parse(input)?; // VQAHeader is always 42 bytes long
     let (input, version) = vqa_version(input)?;
     let (input, flags) = le_u16(input)?;
     let (input, num_frames) = le_u16(input)?;
@@ -147,9 +149,9 @@ pub struct FINFChunk {
 }
 
 pub fn finf_chunk(input: &[u8]) -> IResult<&[u8], FINFChunk> {
-    let (input, _) = tag("FINF")(input)?;
+    let (input, _) = tag("FINF").parse(input)?;
     let (input, size) = be_u32(input)?;
-    let (input, offsets) = count(le_u32, size as usize / 4)(input)?;
+    let (input, offsets) = count(le_u32, size as usize / 4).parse(input)?;
 
     Ok((input, FINFChunk { size, offsets }))
 }
@@ -161,9 +163,9 @@ pub struct SND2Chunk<'a> {
 }
 
 pub fn snd2_chunk(input: &[u8]) -> IResult<&[u8], SND2Chunk<'_>> {
-    let (input, _) = tag("SND2")(input)?;
+    let (input, _) = tag("SND2").parse(input)?;
     let (input, size) = be_u32(input)?;
-    let (input, data) = take(size)(input)?;
+    let (input, data) = take(size).parse(input)?;
 
     Ok((input, SND2Chunk { size, data }))
 }
@@ -175,9 +177,9 @@ pub struct VQFRChunk<'a> {
 }
 
 pub fn vqfr_chunk(input: &[u8]) -> IResult<&[u8], VQFRChunk<'_>> {
-    let (input, _) = tag("VQFR")(input)?;
+    let (input, _) = tag("VQFR").parse(input)?;
     let (input, size) = be_u32(input)?;
-    let (input, data) = take(size)(input)?;
+    let (input, data) = take(size).parse(input)?;
 
     Ok((input, VQFRChunk { size, data }))
 }
@@ -190,10 +192,10 @@ pub struct CBFChunk<'a> {
 }
 
 pub fn cbf_chunk(input: &[u8]) -> IResult<&[u8], CBFChunk<'_>> {
-    let (input, _) = tag("CBF")(input)?;
-    let (input, compressed) = alt((value(true, tag("Z")), value(false, tag("0"))))(input)?;
+    let (input, _) = tag("CBF").parse(input)?;
+    let (input, compressed) = alt((value(true, tag("Z")), value(false, tag("0")))).parse(input)?;
     let (input, size) = be_u32(input)?;
-    let (input, data) = take(size)(input)?;
+    let (input, data) = take(size).parse(input)?;
 
     Ok((
         input,

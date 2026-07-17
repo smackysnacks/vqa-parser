@@ -2,34 +2,34 @@ use vqa_parser::audio::CodecState;
 use vqa_parser::{form_chunk, snd2_chunk, vqa_header};
 use vqa_parser::{SND2Chunk, VQAHeader};
 
-use cpal::traits::{EventLoopTrait, HostTrait};
+use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 
 use nom::bytes::complete::{tag, take_until};
 use nom::multi::many0;
-use nom::IResult;
+use nom::{IResult, Parser};
 
-use cpal::StreamData;
 use std::collections::VecDeque;
 use std::fs::File;
 use std::io::Read;
+use std::sync::mpsc;
 
 fn parse_vqaheader(input: &[u8]) -> IResult<&[u8], VQAHeader> {
     let (input, _) = form_chunk(input)?;
-    let (input, _) = tag("WVQA")(input)?;
+    let (input, _) = tag("WVQA").parse(input)?;
     let (input, vqaheader) = vqa_header(input)?;
 
     Ok((input, vqaheader))
 }
 
-fn next_snd2_chunk(input: &[u8]) -> IResult<&[u8], SND2Chunk> {
-    let (input, _) = take_until("SND2")(input)?;
+fn next_snd2_chunk(input: &[u8]) -> IResult<&[u8], SND2Chunk<'_>> {
+    let (input, _) = take_until("SND2").parse(input)?;
     let (input, chunk) = snd2_chunk(input)?;
 
     Ok((input, chunk))
 }
 
-fn all_snd2_chunks(input: &[u8]) -> IResult<&[u8], Vec<SND2Chunk>> {
-    let (input, chunks) = many0(next_snd2_chunk)(input)?;
+fn all_snd2_chunks(input: &[u8]) -> IResult<&[u8], Vec<SND2Chunk<'_>>> {
+    let (input, chunks) = many0(next_snd2_chunk).parse(input)?;
 
     Ok((input, chunks))
 }
@@ -37,7 +37,7 @@ fn all_snd2_chunks(input: &[u8]) -> IResult<&[u8], Vec<SND2Chunk>> {
 fn main() {
     let mut args = std::env::args();
     if args.len() != 2 {
-        println!("usage: {} <vqa file>", args.nth(0).unwrap());
+        println!("usage: {} <vqa file>", args.next().unwrap());
         return;
     }
 
@@ -61,7 +61,7 @@ fn get_samples(chunks: &[SND2Chunk]) -> VecDeque<i16> {
         let left =
             vqa_parser::audio::decompress(&mut ch1_state, &chunk.data[..chunk.data.len() / 2]);
         let right =
-            vqa_parser::audio::decompress(&mut ch2_state, &chunk.data[..chunk.data.len() / 2]);
+            vqa_parser::audio::decompress(&mut ch2_state, &chunk.data[chunk.data.len() / 2..]);
 
         // interleave data
         for i in 0..left.len() {
@@ -74,40 +74,38 @@ fn get_samples(chunks: &[SND2Chunk]) -> VecDeque<i16> {
 }
 
 fn play_chunks(chunks: &[SND2Chunk]) {
-    let format = cpal::Format {
+    let config = cpal::StreamConfig {
         channels: 2,
-        sample_rate: cpal::SampleRate(22050),
-        data_type: cpal::SampleFormat::I16,
+        sample_rate: 22050,
+        buffer_size: cpal::BufferSize::Default,
     };
 
     let mut sampledata = get_samples(chunks);
 
     let host = cpal::default_host();
-    let event_loop = host.event_loop();
     let device = host
         .default_output_device()
         .expect("no output device available");
-    let stream_id = event_loop.build_output_stream(&device, &format).unwrap();
 
-    event_loop
-        .play_stream(stream_id)
-        .expect("failed to play_stream");
-    event_loop.run(move |_stream_id, _stream_result| {
-        let stream_data = _stream_result.expect("an error occurred on stream");
-
-        match stream_data {
-            StreamData::Output {
-                buffer: cpal::UnknownTypeOutputBuffer::I16(mut buffer),
-            } => {
-                for sample in buffer.chunks_mut(2) {
-                    for out in sample.iter_mut() {
-                        *out = sampledata
-                            .pop_front()
-                            .unwrap_or_else(|| std::process::exit(0));
-                    }
+    let (done_tx, done_rx) = mpsc::channel();
+    let stream = device
+        .build_output_stream(
+            config,
+            move |buffer: &mut [i16], _: &cpal::OutputCallbackInfo| {
+                for out in buffer.iter_mut() {
+                    *out = sampledata.pop_front().unwrap_or_else(|| {
+                        let _ = done_tx.send(());
+                        0
+                    });
                 }
-            }
-            _ => (),
-        }
-    });
+            },
+            |err| eprintln!("an error occurred on stream: {err}"),
+            None,
+        )
+        .expect("failed to build output stream");
+
+    stream.play().expect("failed to play stream");
+
+    // block until the sample queue runs dry, then drop the stream
+    let _ = done_rx.recv();
 }
