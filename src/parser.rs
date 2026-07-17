@@ -236,6 +236,6 @@ mod tests {
             Ok((b"trailing", VQAVersion::Three))
         ));
 
-        assert!(matches!(vqa_version(b"\x04\x00trailing"), Err(_)));
+        assert!(vqa_version(b"\x04\x00trailing").is_err());
     }
 }

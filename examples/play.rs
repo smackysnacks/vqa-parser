@@ -49,11 +49,17 @@ fn main() {
     let snd2_chunks = all_snd2_chunks(&buffer).unwrap().1;
 
     println!("{:#?}", vqa);
-    play_chunks(&snd2_chunks);
+
+    // v1 VQAs can have freq set to 0, in which case 22050 Hz applies
+    let freq = match vqa.freq {
+        0 => 22050,
+        freq => u32::from(freq),
+    };
+    play_chunks(&snd2_chunks, freq);
 }
 
-fn get_samples(chunks: &[SND2Chunk]) -> VecDeque<i16> {
-    let mut samples = VecDeque::new();
+fn get_samples(chunks: &[SND2Chunk]) -> Vec<i16> {
+    let mut samples = Vec::new();
 
     let mut ch1_state = CodecState::new();
     let mut ch2_state = CodecState::new();
@@ -65,38 +71,95 @@ fn get_samples(chunks: &[SND2Chunk]) -> VecDeque<i16> {
 
         // interleave data
         for i in 0..left.len() {
-            samples.push_back(left[i] as i16);
-            samples.push_back(right[i] as i16);
+            samples.push(left[i]);
+            samples.push(right[i]);
         }
     }
 
     samples
 }
 
-fn play_chunks(chunks: &[SND2Chunk]) {
-    let config = cpal::StreamConfig {
-        channels: 2,
-        sample_rate: 22050,
-        buffer_size: cpal::BufferSize::Default,
-    };
+/// Resample interleaved stereo audio to a new rate using linear interpolation
+fn resample_stereo(input: &[i16], from_rate: u32, to_rate: u32) -> Vec<i16> {
+    if from_rate == to_rate || input.is_empty() {
+        return input.to_vec();
+    }
 
-    let mut sampledata = get_samples(chunks);
+    let in_frames = input.len() / 2;
+    let out_frames = (in_frames as u64 * u64::from(to_rate) / u64::from(from_rate)) as usize;
+    let mut out = Vec::with_capacity(out_frames * 2);
+    for n in 0..out_frames {
+        let pos = n as f64 * f64::from(from_rate) / f64::from(to_rate);
+        let i = pos as usize;
+        let frac = pos - i as f64;
+        let next = (i + 1).min(in_frames - 1);
+        for ch in 0..2 {
+            let a = f64::from(input[i * 2 + ch]);
+            let b = f64::from(input[next * 2 + ch]);
+            out.push((a + (b - a) * frac) as i16);
+        }
+    }
 
+    out
+}
+
+fn play_chunks(chunks: &[SND2Chunk], freq: u32) {
     let host = cpal::default_host();
     let device = host
         .default_output_device()
         .expect("no output device available");
 
+    // Open the stream with the device's own default configuration — on some
+    // hosts (e.g. WASAPI in shared mode) any other rate/format is rejected —
+    // and adapt our audio to it instead.
+    let supported = device
+        .default_output_config()
+        .expect("no default output config");
+    let config = supported.config();
+
+    let samples = resample_stereo(&get_samples(chunks), freq, config.sample_rate);
+
+    match supported.sample_format() {
+        cpal::SampleFormat::F32 => run::<f32>(&device, config, samples),
+        cpal::SampleFormat::I16 => run::<i16>(&device, config, samples),
+        cpal::SampleFormat::U16 => run::<u16>(&device, config, samples),
+        format => panic!("unsupported sample format {}", format),
+    }
+}
+
+fn run<T: cpal::SizedSample + cpal::FromSample<i16>>(
+    device: &cpal::Device,
+    config: cpal::StreamConfig,
+    samples: Vec<i16>,
+) {
+    let channels = usize::from(config.channels);
+    let mut sampledata = VecDeque::from(samples);
+
     let (done_tx, done_rx) = mpsc::channel();
     let stream = device
         .build_output_stream(
             config,
-            move |buffer: &mut [i16], _: &cpal::OutputCallbackInfo| {
-                for out in buffer.iter_mut() {
-                    *out = sampledata.pop_front().unwrap_or_else(|| {
-                        let _ = done_tx.send(());
-                        0
-                    });
+            move |buffer: &mut [T], _: &cpal::OutputCallbackInfo| {
+                for frame in buffer.chunks_mut(channels) {
+                    let (left, right) = match (sampledata.pop_front(), sampledata.pop_front()) {
+                        (Some(left), Some(right)) => (left, right),
+                        _ => {
+                            let _ = done_tx.send(());
+                            (0, 0)
+                        }
+                    };
+                    if let [out] = frame {
+                        // mono device: mix both channels down
+                        *out = T::from_sample(((i32::from(left) + i32::from(right)) / 2) as i16);
+                    } else {
+                        for (ch, out) in frame.iter_mut().enumerate() {
+                            *out = T::from_sample(match ch {
+                                0 => left,
+                                1 => right,
+                                _ => 0,
+                            });
+                        }
+                    }
                 }
             },
             |err| eprintln!("an error occurred on stream: {err}"),

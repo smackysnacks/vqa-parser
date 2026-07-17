@@ -31,12 +31,12 @@ impl Default for CodecState {
 /// Decompress samples of a _single_ audio channel using the IMA ADPCM algorithm.
 ///
 /// Pass in a separate `state` for each channel
-pub fn decompress(state: &mut CodecState, input: &[u8]) -> Box<[u16]> {
+pub fn decompress(state: &mut CodecState, input: &[u8]) -> Vec<i16> {
     let mut buffer = Vec::with_capacity(input.len() * 2);
     let mut low_nibble = true;
     let mut i = 0;
 
-    let mut step = *unsafe { STEP_TABLE.get_unchecked(state.index as usize) };
+    let mut step = STEP_TABLE[state.index as usize];
     while i < input.len() {
         let nibble: u8;
         if low_nibble {
@@ -47,12 +47,7 @@ pub fn decompress(state: &mut CodecState, input: &[u8]) -> Box<[u16]> {
         };
         low_nibble = !low_nibble;
 
-        state.index += *unsafe { INDEX_ADJUSTMENT.get_unchecked(nibble as usize) };
-        if state.index < 0 {
-            state.index = 0;
-        } else if state.index > 88 {
-            state.index = 88;
-        }
+        state.index = (state.index + INDEX_ADJUSTMENT[nibble as usize]).clamp(0, 88);
         let sign = nibble & 8;
         let delta = nibble & 7;
         let mut diff = step >> 3;
@@ -70,15 +65,11 @@ pub fn decompress(state: &mut CodecState, input: &[u8]) -> Box<[u16]> {
         } else {
             state.sample += diff as i32;
         }
-        if state.sample < -32768 {
-            state.sample = -32768;
-        } else if state.sample > 32767 {
-            state.sample = 32767;
-        }
-        step = *unsafe { STEP_TABLE.get_unchecked(state.index as usize) };
+        state.sample = state.sample.clamp(-32768, 32767);
+        step = STEP_TABLE[state.index as usize];
 
-        buffer.push(state.sample as u16);
+        buffer.push(state.sample as i16);
     }
 
-    buffer.into_boxed_slice()
+    buffer
 }
