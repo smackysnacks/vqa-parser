@@ -18,8 +18,11 @@ const MAX_FRAME_PIXELS: usize = 1 << 24;
 /// One decoded video frame.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Frame {
+    /// Width in pixels.
     pub width: usize,
+    /// Height in pixels.
     pub height: usize,
+    /// The pixel data, row-major.
     pub pixels: FramePixels,
 }
 
@@ -29,11 +32,16 @@ pub enum FramePixels {
     /// 8-bit palette indices plus the palette in effect, already scaled from
     /// VGA 6-bit to full 8-bit range.
     Indexed {
+        /// One palette index per pixel.
         pixels: Vec<u8>,
+        /// The RGB palette the indices point into.
         palette: Vec<[u8; 3]>,
     },
     /// 15-bit `0rrrrrgg gggbbbbb` pixels (5 bits per channel).
-    HiColor { pixels: Vec<u16> },
+    HiColor {
+        /// One packed 15-bit value per pixel.
+        pixels: Vec<u16>,
+    },
 }
 
 impl Frame {
@@ -92,6 +100,8 @@ pub struct FrameDecoder {
 }
 
 impl FrameDecoder {
+    /// Build a decoder sized from the header. Fails on a zero block size or
+    /// on frame dimensions past the sanity cap.
     pub fn new(header: &VQAHeader) -> Result<FrameDecoder, Error> {
         let block_w = usize::from(header.block_width);
         let block_h = usize::from(header.block_height);

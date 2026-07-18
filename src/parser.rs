@@ -1,5 +1,10 @@
-//! The `parser` module contains structures and functions for parsing the VQA
-//! (Vector Quantized Animation) format.
+//! Low-level nom parsers for the individual chunks of a VQA file.
+//!
+//! Every parser here consumes one chunk - tag, big-endian size, payload, and
+//! the pad byte that follows an odd-sized payload - and borrows the payload
+//! from the input (zero-copy). For whole-file access prefer [`crate::VQA`],
+//! which composes these parsers and handles chunk types this module has no
+//! dedicated parser for.
 
 use std::convert::TryInto;
 
@@ -10,7 +15,7 @@ use nom::{
     bytes::complete::{tag, take},
     combinator::{cond, map, map_opt, opt, value, verify},
     multi::count,
-    number::complete::{be_u32, le_u8, le_u16, le_u32},
+    number::complete::{be_u32, le_u16, le_u32, u8},
 };
 
 /// Take `size` bytes of chunk payload, also consuming the pad byte that
@@ -62,7 +67,9 @@ fn compressible_chunk<'a>(
 pub struct RawChunk<'a> {
     /// The chunk's 4-character ID, e.g. `b"SND2"`
     pub id: [u8; 4],
+    /// Payload size in bytes.
     pub size: u32,
+    /// The raw payload, borrowed from the input.
     pub data: &'a [u8],
 }
 
@@ -88,11 +95,17 @@ pub fn raw_chunk(input: &[u8]) -> IResult<&[u8], RawChunk<'_>> {
     ))
 }
 
+/// The outer `FORM` container that wraps the whole file (an EA IFF 85 form).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FormChunk {
+    /// Size of the form's contents in bytes. In v2/v3 movies this is the
+    /// file size minus the 8-byte chunk header.
     pub size: u32,
 }
 
+/// Parse the `FORM` chunk that opens every VQA file. Consumes only the tag
+/// and size; the form's contents (the `WVQA` signature followed by all other
+/// chunks) stay in the input.
 pub fn form_chunk(input: &[u8]) -> IResult<&[u8], FormChunk> {
     let (input, _) = tag("FORM").parse(input)?;
     let (input, size) = be_u32(input)?;
@@ -100,13 +113,24 @@ pub fn form_chunk(input: &[u8]) -> IResult<&[u8], FormChunk> {
     Ok((input, FormChunk { size }))
 }
 
+/// The format version stored in the header.
+///
+/// The version alone does not imply the pixel format: most HiColor movies
+/// are v3, but some v2 movies (Dune 2000) are HiColor too - check
+/// [`VQAHeader::is_hicolor`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VQAVersion {
+    /// Version 1, used only in The Legend of Kyrandia III.
     One,
+    /// Version 2, used in C&C, Red Alert, Lands of Lore II, and Dune 2000.
     Two,
+    /// Version 3, used in the HiColor-era games (Tiberian Sun, Lands of
+    /// Lore III, Blade Runner, Nox).
     Three,
 }
 
+/// Parse the header's little-endian version field; values other than 1-3
+/// fail.
 pub fn vqa_version(input: &[u8]) -> IResult<&[u8], VQAVersion> {
     map_opt(le_u16, |n| match n {
         1 => Some(VQAVersion::One),
@@ -118,12 +142,24 @@ pub fn vqa_version(input: &[u8]) -> IResult<&[u8], VQAVersion> {
 }
 
 bitflags! {
+    /// Flag bits from the header's `flags` field.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub struct VQAFlags: u16 {
+        /// The movie carries a soundtrack.
         const HAS_SOUND = 0b00000001;
     }
 }
 
+/// The fixed 42-byte `VQHD` header describing the whole movie.
+///
+/// v1 movies leave several sound fields zeroed; the [`sample_rate`],
+/// [`num_channels`], and [`bit_depth`] helpers apply the documented
+/// fallbacks, so prefer them over reading `freq`, `channels`, and `bits`
+/// directly.
+///
+/// [`sample_rate`]: VQAHeader::sample_rate
+/// [`num_channels`]: VQAHeader::num_channels
+/// [`bit_depth`]: VQAHeader::bit_depth
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VQAHeader {
     /// VQA version number
@@ -206,25 +242,27 @@ impl VQAHeader {
     }
 }
 
+/// Parse the `VQHD` header chunk: the tag, the fixed 42-byte size, and every
+/// header field.
 pub fn vqa_header(input: &[u8]) -> IResult<&[u8], VQAHeader> {
-    let (input, _) = tag(&b"VQHD"[..]).parse(input)?;
-    let (input, _) = tag(&b"\x00\x00\x00\x2a"[..]).parse(input)?; // VQAHeader is always 42 bytes long
+    let (input, _) = tag("VQHD").parse(input)?;
+    let (input, _) = verify(be_u32, |&size| size == 42).parse(input)?;
     let (input, version) = vqa_version(input)?;
     let (input, flags) = le_u16(input)?;
     let (input, num_frames) = le_u16(input)?;
     let (input, width) = le_u16(input)?;
     let (input, height) = le_u16(input)?;
-    let (input, block_width) = le_u8(input)?;
-    let (input, block_height) = le_u8(input)?;
-    let (input, frame_rate) = le_u8(input)?;
-    let (input, cbparts) = le_u8(input)?;
+    let (input, block_width) = u8(input)?;
+    let (input, block_height) = u8(input)?;
+    let (input, frame_rate) = u8(input)?;
+    let (input, cbparts) = u8(input)?;
     let (input, colors) = le_u16(input)?;
     let (input, maxblocks) = le_u16(input)?;
     let (input, unk1) = le_u32(input)?;
     let (input, unk2) = le_u16(input)?;
     let (input, freq) = le_u16(input)?;
-    let (input, channels) = le_u8(input)?;
-    let (input, bits) = le_u8(input)?;
+    let (input, channels) = u8(input)?;
+    let (input, bits) = u8(input)?;
     let (input, unk3) = le_u32(input)?;
     let (input, unk4) = le_u16(input)?;
     let (input, max_cbfz_size) = le_u32(input)?;
@@ -264,12 +302,16 @@ pub fn vqa_header(input: &[u8]) -> IResult<&[u8], VQAHeader> {
 /// (its SND? chunk when the movie has sound, its VQFR chunk otherwise).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FrameInfo {
+    /// Absolute byte offset of the frame's data from the start of the file.
     pub offset: u32,
+    /// Whether the frame carries a new palette (stored bit 30).
     pub has_palette: bool,
 }
 
 const FINF_PALETTE_FLAG: u32 = 0x4000_0000;
 
+/// Parse one raw FINF entry, applying the transforms described on
+/// [`FrameInfo`].
 pub fn frame_info(input: &[u8]) -> IResult<&[u8], FrameInfo> {
     map(le_u32, |raw| FrameInfo {
         offset: (raw & (FINF_PALETTE_FLAG - 1)) * 2,
@@ -278,12 +320,17 @@ pub fn frame_info(input: &[u8]) -> IResult<&[u8], FrameInfo> {
     .parse(input)
 }
 
+/// The frame index, sitting between the header and the first frame's data:
+/// the position of every frame in the file, in frame order.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FINFChunk {
+    /// Payload size in bytes (4 bytes per frame).
     pub size: u32,
+    /// One decoded entry per frame.
     pub frames: Vec<FrameInfo>,
 }
 
+/// Parse the `FINF` chunk into decoded per-frame positions.
 pub fn finf_chunk(input: &[u8]) -> IResult<&[u8], FINFChunk> {
     let (input, _) = tag("FINF").parse(input)?;
     let (input, size) = be_u32(input)?;
@@ -298,10 +345,13 @@ pub fn finf_chunk(input: &[u8]) -> IResult<&[u8], FINFChunk> {
 /// in the second, v1/v2 alternate bytes between the channels.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SND2Chunk<'a> {
+    /// Payload size in bytes.
     pub size: u32,
+    /// The compressed sample data, borrowed from the input.
     pub data: &'a [u8],
 }
 
+/// Parse an `SND2` (IMA ADPCM audio) chunk.
 pub fn snd2_chunk(input: &[u8]) -> IResult<&[u8], SND2Chunk<'_>> {
     let (input, (size, data)) = plain_chunk("SND2")(input)?;
 
@@ -312,10 +362,14 @@ pub fn snd2_chunk(input: &[u8]) -> IResult<&[u8], SND2Chunk<'_>> {
 /// CPL?, VPT?, VPTR/VPRZ).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VQFRChunk<'a> {
+    /// Payload size in bytes.
     pub size: u32,
+    /// The nested sub-chunks, unparsed, borrowed from the input.
     pub data: &'a [u8],
 }
 
+/// Parse a `VQFR` (video frame) chunk; its sub-chunks stay unparsed in
+/// `data`.
 pub fn vqfr_chunk(input: &[u8]) -> IResult<&[u8], VQFRChunk<'_>> {
     let (input, (size, data)) = plain_chunk("VQFR")(input)?;
 
@@ -327,11 +381,15 @@ pub fn vqfr_chunk(input: &[u8]) -> IResult<&[u8], VQFRChunk<'_>> {
 /// relative LCW variant ([`crate::lcw::decompress`] handles both).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CBFChunk<'a> {
+    /// Payload size in bytes.
     pub size: u32,
+    /// Whether `data` is LCW-compressed (a `CBFZ` chunk).
     pub compressed: bool,
+    /// The codebook data, borrowed from the input.
     pub data: &'a [u8],
 }
 
+/// Parse a `CBF0`/`CBFZ` (full codebook) chunk.
 pub fn cbf_chunk(input: &[u8]) -> IResult<&[u8], CBFChunk<'_>> {
     let (input, (compressed, size, data)) = compressible_chunk("CBF")(input)?;
 
@@ -350,11 +408,15 @@ pub fn cbf_chunk(input: &[u8]) -> IResult<&[u8], CBFChunk<'_>> {
 /// are decompressed only after concatenation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CBPChunk<'a> {
+    /// Payload size in bytes.
     pub size: u32,
+    /// Whether the *concatenated* parts are LCW-compressed (`CBPZ` chunks).
     pub compressed: bool,
+    /// This part's bytes, borrowed from the input.
     pub data: &'a [u8],
 }
 
+/// Parse a `CBP0`/`CBPZ` (codebook part) chunk.
 pub fn cbp_chunk(input: &[u8]) -> IResult<&[u8], CBPChunk<'_>> {
     let (input, (compressed, size, data)) = compressible_chunk("CBP")(input)?;
 
@@ -372,11 +434,15 @@ pub fn cbp_chunk(input: &[u8]) -> IResult<&[u8], CBPChunk<'_>> {
 /// of each value are significant (VGA hardware).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CPLChunk<'a> {
+    /// Payload size in bytes.
     pub size: u32,
+    /// Whether `data` is LCW-compressed (a `CPLZ` chunk).
     pub compressed: bool,
+    /// The palette data, borrowed from the input.
     pub data: &'a [u8],
 }
 
+/// Parse a `CPL0`/`CPLZ` (palette) chunk.
 pub fn cpl_chunk(input: &[u8]) -> IResult<&[u8], CPLChunk<'_>> {
     let (input, (compressed, size, data)) = compressible_chunk("CPL")(input)?;
 
@@ -394,11 +460,15 @@ pub fn cpl_chunk(input: &[u8]) -> IResult<&[u8], CPLChunk<'_>> {
 /// codebook (layout differs between v1 and v2, see `doc/vqa.txt`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VPTChunk<'a> {
+    /// Payload size in bytes.
     pub size: u32,
+    /// Whether `data` is LCW-compressed (a `VPTZ` chunk).
     pub compressed: bool,
+    /// The pointer table, borrowed from the input.
     pub data: &'a [u8],
 }
 
+/// Parse a `VPT0`/`VPTZ` (8-bit vector pointer table) chunk.
 pub fn vpt_chunk(input: &[u8]) -> IResult<&[u8], VPTChunk<'_>> {
     let (input, (compressed, size, data)) = compressible_chunk("VPT")(input)?;
 
@@ -416,11 +486,15 @@ pub fn vpt_chunk(input: &[u8]) -> IResult<&[u8], VPTChunk<'_>> {
 /// differential command stream updating the previous frame's blocks.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VPTRChunk<'a> {
+    /// Payload size in bytes.
     pub size: u32,
+    /// Whether `data` is LCW-compressed (a `VPRZ` chunk).
     pub compressed: bool,
+    /// The command stream, borrowed from the input.
     pub data: &'a [u8],
 }
 
+/// Parse a `VPTR`/`VPRZ` (HiColor vector pointer stream) chunk.
 pub fn vptr_chunk(input: &[u8]) -> IResult<&[u8], VPTRChunk<'_>> {
     let (input, compressed) =
         alt((value(false, tag("VPTR")), value(true, tag("VPRZ")))).parse(input)?;
@@ -441,10 +515,13 @@ pub fn vptr_chunk(input: &[u8]) -> IResult<&[u8], VPTRChunk<'_>> {
 /// sub-chunks (in practice a single CBFZ).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VQFLChunk<'a> {
+    /// Payload size in bytes.
     pub size: u32,
+    /// The nested sub-chunks, unparsed, borrowed from the input.
     pub data: &'a [u8],
 }
 
+/// Parse a `VQFL` (HiColor codebook refresh) chunk.
 pub fn vqfl_chunk(input: &[u8]) -> IResult<&[u8], VQFLChunk<'_>> {
     let (input, (size, data)) = plain_chunk("VQFL")(input)?;
 
@@ -455,10 +532,13 @@ pub fn vqfl_chunk(input: &[u8]) -> IResult<&[u8], VQFLChunk<'_>> {
 /// jumping into the stream); not needed for sequential playback.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SN2JChunk<'a> {
+    /// Payload size in bytes.
     pub size: u32,
+    /// The seek-state data, borrowed from the input.
     pub data: &'a [u8],
 }
 
+/// Parse an `SN2J` (ADPCM seek state) chunk.
 pub fn sn2j_chunk(input: &[u8]) -> IResult<&[u8], SN2JChunk<'_>> {
     let (input, (size, data)) = plain_chunk("SN2J")(input)?;
 

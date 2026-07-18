@@ -1,6 +1,5 @@
 set positional-arguments
 
-alias r := run
 alias t := test
 alias c := check
 alias b := build
@@ -8,10 +7,6 @@ alias l := lint
 
 help:
     @just --list
-
-# Run the cli
-run:
-    cargo run
 
 # Run cargo check on workspace
 check:

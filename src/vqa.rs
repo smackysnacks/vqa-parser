@@ -18,6 +18,7 @@ use crate::video::{Frame, FrameDecoder};
 pub struct VQA<'a> {
     /// The FORM container size
     pub form_size: u32,
+    /// The parsed movie header
     pub header: VQAHeader,
     /// The decoded FINF frame index (absolute byte offsets of each frame's
     /// data), when the movie carries one

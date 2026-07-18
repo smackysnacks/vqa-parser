@@ -1,3 +1,5 @@
+//! The IMA ADPCM decoder: 4 bits per sample, decoded to signed 16-bit PCM.
+
 const STEP_TABLE: [u32; 89] = [
     7, 8, 9, 10, 11, 12, 13, 14, 16, 17, 19, 21, 23, 25, 28, 31, 34, 37, 41, 45, 50, 55, 60, 66,
     73, 80, 88, 97, 107, 118, 130, 143, 157, 173, 190, 209, 230, 253, 279, 307, 337, 371, 408, 449,
@@ -8,12 +10,18 @@ const STEP_TABLE: [u32; 89] = [
 
 const INDEX_ADJUSTMENT: [i32; 16] = [-1, -1, -1, -1, 2, 4, 6, 8, -1, -1, -1, -1, 2, 4, 6, 8];
 
+/// Predictor state for one audio channel, carried across chunk boundaries.
+///
+/// Feed every chunk of a channel through [`decompress`] with the same state;
+/// stereo streams need one state per channel.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CodecState {
     sample: i32,
     index: i32,
 }
 
 impl CodecState {
+    /// A fresh predictor state, for the start of a stream.
     pub fn new() -> CodecState {
         CodecState {
             sample: 0,
@@ -28,9 +36,11 @@ impl Default for CodecState {
     }
 }
 
-/// Decompress samples of a _single_ audio channel using the IMA ADPCM algorithm.
+/// Decompress IMA ADPCM data of a _single_ audio channel into signed 16-bit
+/// PCM: two samples per input byte, low nibble first.
 ///
-/// Pass in a separate `state` for each channel
+/// `state` carries the predictor across calls, so consecutive chunks of a
+/// stream decode with the same state - and each channel needs its own.
 pub fn decompress(state: &mut CodecState, input: &[u8]) -> Vec<i16> {
     let mut buffer = Vec::with_capacity(input.len() * 2);
     let mut low_nibble = true;
