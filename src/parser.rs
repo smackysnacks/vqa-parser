@@ -1,11 +1,13 @@
 //! The `parser` module contains structures and functions for parsing the VQA
 //! (Vector Quantized Animation) format.
 
+use std::convert::TryInto;
+
 use bitflags::bitflags;
 use nom::{
     branch::alt,
     bytes::complete::{tag, take},
-    combinator::{cond, map, map_opt, opt, value},
+    combinator::{cond, map, map_opt, opt, value, verify},
     multi::count,
     number::complete::{be_u32, le_u16, le_u32, le_u8},
     IResult, Parser,
@@ -23,7 +25,70 @@ fn chunk_data<'a>(size: u32) -> impl FnMut(&'a [u8]) -> IResult<&'a [u8], &'a [u
     }
 }
 
-#[derive(Debug)]
+/// The prelude shared by every chunk parser: the chunk's 4-character ID, its
+/// big-endian size, and the (padded) payload.
+fn plain_chunk<'a>(id: &'static str) -> impl FnMut(&'a [u8]) -> IResult<&'a [u8], (u32, &'a [u8])> {
+    move |input| {
+        let (input, _) = tag(id).parse(input)?;
+        let (input, size) = be_u32(input)?;
+        let (input, data) = chunk_data(size)(input)?;
+
+        Ok((input, (size, data)))
+    }
+}
+
+/// `(compressed, size, data)` of a chunk parsed by [`compressible_chunk`]
+type CompressiblePayload<'a> = (bool, u32, &'a [u8]);
+
+/// A chunk whose last ID character selects LCW compression: `Z` means the
+/// payload is compressed, `0` that it is raw.
+fn compressible_chunk<'a>(
+    prefix: &'static str,
+) -> impl FnMut(&'a [u8]) -> IResult<&'a [u8], CompressiblePayload<'a>> {
+    move |input| {
+        let (input, _) = tag(prefix).parse(input)?;
+        let (input, compressed) =
+            alt((value(true, tag("Z")), value(false, tag("0")))).parse(input)?;
+        let (input, size) = be_u32(input)?;
+        let (input, data) = chunk_data(size)(input)?;
+
+        Ok((input, (compressed, size, data)))
+    }
+}
+
+/// Any chunk, without knowing its type: the generic escape hatch for walking
+/// over chunks this crate has no dedicated parser for (LINF, CINF, PINF, ...).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RawChunk<'a> {
+    /// The chunk's 4-character ID, e.g. `b"SND2"`
+    pub id: [u8; 4],
+    pub size: u32,
+    pub data: &'a [u8],
+}
+
+/// Parse any single chunk. IDs are validated to be uppercase ASCII letters
+/// and digits, so a desynced or corrupt stream fails instead of producing
+/// nonsense chunks.
+pub fn raw_chunk(input: &[u8]) -> IResult<&[u8], RawChunk<'_>> {
+    let (input, id) = verify(take(4usize), |id: &[u8]| {
+        id.iter()
+            .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit())
+    })
+    .parse(input)?;
+    let (input, size) = be_u32(input)?;
+    let (input, data) = chunk_data(size)(input)?;
+
+    Ok((
+        input,
+        RawChunk {
+            id: id.try_into().expect("take(4) yields 4 bytes"),
+            size,
+            data,
+        },
+    ))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FormChunk {
     pub size: u32,
 }
@@ -35,7 +100,7 @@ pub fn form_chunk(input: &[u8]) -> IResult<&[u8], FormChunk> {
     Ok((input, FormChunk { size }))
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VQAVersion {
     One,
     Two,
@@ -59,7 +124,7 @@ bitflags! {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VQAHeader {
     /// VQA version number
     pub version: VQAVersion,
@@ -101,6 +166,44 @@ pub struct VQAHeader {
     pub max_cbfz_size: u32,
     /// Always 0?
     pub unk5: u32,
+}
+
+impl VQAHeader {
+    /// The sound sampling rate in Hz, applying the documented v1 fallback
+    /// (a stored 0 means 22050 Hz).
+    pub fn sample_rate(&self) -> u32 {
+        match self.freq {
+            0 => 22050,
+            freq => u32::from(freq),
+        }
+    }
+
+    /// The number of sound channels (a stored 0 means mono).
+    pub fn num_channels(&self) -> u8 {
+        match self.channels {
+            0 => 1,
+            channels => channels,
+        }
+    }
+
+    /// The sound resolution in bits (a stored 0 means 8-bit).
+    pub fn bit_depth(&self) -> u8 {
+        match self.bits {
+            0 => 8,
+            bits => bits,
+        }
+    }
+
+    /// Whether the movie carries a soundtrack.
+    pub fn has_sound(&self) -> bool {
+        self.flags.contains(VQAFlags::HAS_SOUND)
+    }
+
+    /// Whether the movie is HiColor (15-bit pixels) rather than 8-bit
+    /// palettized. HiColor movies store 0 in the `colors` field.
+    pub fn is_hicolor(&self) -> bool {
+        self.colors == 0
+    }
 }
 
 pub fn vqa_header(input: &[u8]) -> IResult<&[u8], VQAHeader> {
@@ -175,7 +278,7 @@ pub fn frame_info(input: &[u8]) -> IResult<&[u8], FrameInfo> {
     .parse(input)
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FINFChunk {
     pub size: u32,
     pub frames: Vec<FrameInfo>,
@@ -189,35 +292,40 @@ pub fn finf_chunk(input: &[u8]) -> IResult<&[u8], FINFChunk> {
     Ok((input, FINFChunk { size, frames }))
 }
 
-#[derive(Debug)]
+/// A sound chunk holding IMA ADPCM compressed 16-bit samples; decode with
+/// [`crate::audio::decompress`]. Stereo data is laid out per VQA version:
+/// v3 stores the left channel in the first half of the chunk and the right
+/// in the second, v1/v2 alternate bytes between the channels.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SND2Chunk<'a> {
     pub size: u32,
     pub data: &'a [u8],
 }
 
 pub fn snd2_chunk(input: &[u8]) -> IResult<&[u8], SND2Chunk<'_>> {
-    let (input, _) = tag("SND2").parse(input)?;
-    let (input, size) = be_u32(input)?;
-    let (input, data) = chunk_data(size)(input)?;
+    let (input, (size, data)) = plain_chunk("SND2")(input)?;
 
     Ok((input, SND2Chunk { size, data }))
 }
 
-#[derive(Debug)]
+/// One frame's video data; `data` holds the nested sub-chunks (CBF?, CBP?,
+/// CPL?, VPT?, VPTR/VPRZ).
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VQFRChunk<'a> {
     pub size: u32,
     pub data: &'a [u8],
 }
 
 pub fn vqfr_chunk(input: &[u8]) -> IResult<&[u8], VQFRChunk<'_>> {
-    let (input, _) = tag("VQFR").parse(input)?;
-    let (input, size) = be_u32(input)?;
-    let (input, data) = chunk_data(size)(input)?;
+    let (input, (size, data)) = plain_chunk("VQFR")(input)?;
 
     Ok((input, VQFRChunk { size, data }))
 }
 
-#[derive(Debug)]
+/// A full codebook (block lookup table), replacing the current one. In
+/// HiColor movies a compressed payload starting with a NUL byte uses the
+/// relative LCW variant ([`crate::lcw::decompress`] handles both).
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CBFChunk<'a> {
     pub size: u32,
     pub compressed: bool,
@@ -225,10 +333,7 @@ pub struct CBFChunk<'a> {
 }
 
 pub fn cbf_chunk(input: &[u8]) -> IResult<&[u8], CBFChunk<'_>> {
-    let (input, _) = tag("CBF").parse(input)?;
-    let (input, compressed) = alt((value(true, tag("Z")), value(false, tag("0")))).parse(input)?;
-    let (input, size) = be_u32(input)?;
-    let (input, data) = chunk_data(size)(input)?;
+    let (input, (compressed, size, data)) = compressible_chunk("CBF")(input)?;
 
     Ok((
         input,
@@ -238,6 +343,126 @@ pub fn cbf_chunk(input: &[u8]) -> IResult<&[u8], CBFChunk<'_>> {
             data,
         },
     ))
+}
+
+/// One part of the next codebook. `cbparts` (from the header) parts are
+/// concatenated in frame order to form the new codebook; compressed parts
+/// are decompressed only after concatenation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CBPChunk<'a> {
+    pub size: u32,
+    pub compressed: bool,
+    pub data: &'a [u8],
+}
+
+pub fn cbp_chunk(input: &[u8]) -> IResult<&[u8], CBPChunk<'_>> {
+    let (input, (compressed, size, data)) = compressible_chunk("CBP")(input)?;
+
+    Ok((
+        input,
+        CBPChunk {
+            size,
+            compressed,
+            data,
+        },
+    ))
+}
+
+/// A color palette: consecutive R, G, B bytes per color. Only the low 6 bits
+/// of each value are significant (VGA hardware).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CPLChunk<'a> {
+    pub size: u32,
+    pub compressed: bool,
+    pub data: &'a [u8],
+}
+
+pub fn cpl_chunk(input: &[u8]) -> IResult<&[u8], CPLChunk<'_>> {
+    let (input, (compressed, size, data)) = compressible_chunk("CPL")(input)?;
+
+    Ok((
+        input,
+        CPLChunk {
+            size,
+            compressed,
+            data,
+        },
+    ))
+}
+
+/// A vector pointer table for one 8-bit frame: per-block indexes into the
+/// codebook (layout differs between v1 and v2, see `doc/vqa.txt`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VPTChunk<'a> {
+    pub size: u32,
+    pub compressed: bool,
+    pub data: &'a [u8],
+}
+
+pub fn vpt_chunk(input: &[u8]) -> IResult<&[u8], VPTChunk<'_>> {
+    let (input, (compressed, size, data)) = compressible_chunk("VPT")(input)?;
+
+    Ok((
+        input,
+        VPTChunk {
+            size,
+            compressed,
+            data,
+        },
+    ))
+}
+
+/// A HiColor vector pointer stream (`VPTR` raw, `VPRZ` LCW-compressed): a
+/// differential command stream updating the previous frame's blocks.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VPTRChunk<'a> {
+    pub size: u32,
+    pub compressed: bool,
+    pub data: &'a [u8],
+}
+
+pub fn vptr_chunk(input: &[u8]) -> IResult<&[u8], VPTRChunk<'_>> {
+    let (input, compressed) =
+        alt((value(false, tag("VPTR")), value(true, tag("VPRZ")))).parse(input)?;
+    let (input, size) = be_u32(input)?;
+    let (input, data) = chunk_data(size)(input)?;
+
+    Ok((
+        input,
+        VPTRChunk {
+            size,
+            compressed,
+            data,
+        },
+    ))
+}
+
+/// A HiColor full-codebook refresh between frames; `data` holds the nested
+/// sub-chunks (in practice a single CBFZ).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VQFLChunk<'a> {
+    pub size: u32,
+    pub data: &'a [u8],
+}
+
+pub fn vqfl_chunk(input: &[u8]) -> IResult<&[u8], VQFLChunk<'_>> {
+    let (input, (size, data)) = plain_chunk("VQFL")(input)?;
+
+    Ok((input, VQFLChunk { size, data }))
+}
+
+/// An IMA ADPCM seek-state chunk accompanying SND2 data (decoder state for
+/// jumping into the stream); not needed for sequential playback.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SN2JChunk<'a> {
+    pub size: u32,
+    pub data: &'a [u8],
+}
+
+pub fn sn2j_chunk(input: &[u8]) -> IResult<&[u8], SN2JChunk<'_>> {
+    let (input, (size, data)) = plain_chunk("SN2J")(input)?;
+
+    Ok((input, SN2JChunk { size, data }))
 }
 
 #[cfg(test)]
@@ -319,6 +544,58 @@ mod tests {
         let (rest, chunk) = vqfr_chunk(b"VQFR\x00\x00\x00\x05abcde\x00next").unwrap();
         assert_eq!(chunk.data, b"abcde");
         assert_eq!(rest, b"next");
+    }
+
+    #[test]
+    fn raw_chunk_parses_any_id_and_pads() {
+        let (rest, chunk) = raw_chunk(b"LINF\x00\x00\x00\x03abc\x00next").unwrap();
+        assert_eq!(&chunk.id, b"LINF");
+        assert_eq!(chunk.data, b"abc");
+        assert_eq!(rest, b"next");
+    }
+
+    #[test]
+    fn raw_chunk_rejects_non_chunk_ids() {
+        assert!(raw_chunk(b"lin \x00\x00\x00\x00").is_err());
+        assert!(raw_chunk(b"\x00\x01\x02\x03\x00\x00\x00\x00").is_err());
+    }
+
+    #[test]
+    fn cbp_cpl_vpt_chunks_parse_both_variants() {
+        let (_, chunk) = cbp_chunk(b"CBPZ\x00\x00\x00\x02ab").unwrap();
+        assert!(chunk.compressed);
+        assert_eq!(chunk.data, b"ab");
+
+        let (_, chunk) = cpl_chunk(b"CPL0\x00\x00\x00\x03rgb\x00").unwrap();
+        assert!(!chunk.compressed);
+        assert_eq!(chunk.data, b"rgb");
+
+        let (_, chunk) = vpt_chunk(b"VPTZ\x00\x00\x00\x02ab").unwrap();
+        assert!(chunk.compressed);
+        assert_eq!(chunk.data, b"ab");
+    }
+
+    #[test]
+    fn vptr_chunk_parses_raw_and_compressed_ids() {
+        let (_, chunk) = vptr_chunk(b"VPTR\x00\x00\x00\x02ab").unwrap();
+        assert!(!chunk.compressed);
+        assert_eq!(chunk.data, b"ab");
+
+        let (_, chunk) = vptr_chunk(b"VPRZ\x00\x00\x00\x02ab").unwrap();
+        assert!(chunk.compressed);
+
+        // VPT0/VPTZ are a different chunk type
+        assert!(vptr_chunk(b"VPTZ\x00\x00\x00\x02ab").is_err());
+        assert!(vpt_chunk(b"VPTR\x00\x00\x00\x02ab").is_err());
+    }
+
+    #[test]
+    fn vqfl_and_sn2j_chunks_parse() {
+        let (_, chunk) = vqfl_chunk(b"VQFL\x00\x00\x00\x04abcd").unwrap();
+        assert_eq!(chunk.data, b"abcd");
+
+        let (_, chunk) = sn2j_chunk(b"SN2J\x00\x00\x00\x04abcd").unwrap();
+        assert_eq!(chunk.data, b"abcd");
     }
 
     #[test]

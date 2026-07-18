@@ -26,3 +26,10 @@ path = "fuzz_targets/adpcm.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "lcw"
+path = "fuzz_targets/lcw.rs"
+test = false
+doc = false
+bench = false

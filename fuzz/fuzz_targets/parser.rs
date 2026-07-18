@@ -12,6 +12,26 @@ fuzz_target!(|data: &[u8]| {
     let _ = cbf_chunk(data);
     let _ = vqa_header(data);
     let _ = finf_chunk(data);
+    let _ = raw_chunk(data);
+    let _ = cbp_chunk(data);
+    let _ = cpl_chunk(data);
+    let _ = vpt_chunk(data);
+    let _ = vptr_chunk(data);
+    let _ = vqfl_chunk(data);
+    let _ = sn2j_chunk(data);
+
+    // The high-level API must also hold up: parse, decode a bounded number
+    // of video frames, and decode the soundtrack.
+    if let Ok(vqa) = VQA::parse(data) {
+        if let Ok(frames) = vqa.frames() {
+            for frame in frames.take(16) {
+                if frame.is_err() {
+                    break;
+                }
+            }
+        }
+        let _ = vqa.decode_audio();
+    }
 
     // Walk the container the way a real consumer does: FORM header, VQA
     // header, then FINF (scanning past any LINF/CINF chunks before it), and

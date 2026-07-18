@@ -1,0 +1,692 @@
+//! Frame assembly: turning the codebook, palette, and vector-pointer chunks
+//! nested inside VQFR (and VQFL) chunks into pixel frames.
+//!
+//! A VQA frame is a mosaic of `block_width` x `block_height` blocks. The
+//! codebook is the lookup table of block pixel data; the pointer chunks say
+//! which codebook entry every screen block uses. 8-bit movies redraw every
+//! block each frame from a VPT? table; HiColor movies update the previous
+//! frame differentially with a VPTR/VPRZ command stream.
+
+use crate::error::Error;
+use crate::lcw;
+use crate::parser::{raw_chunk, RawChunk, VQAHeader, VQAVersion};
+
+/// Sanity limit on the pixels in one frame and on codebook bytes, so a
+/// malformed header cannot demand gigabyte allocations.
+const MAX_FRAME_PIXELS: usize = 1 << 24;
+
+/// One decoded video frame.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Frame {
+    pub width: usize,
+    pub height: usize,
+    pub pixels: FramePixels,
+}
+
+/// A frame's pixel data, row-major.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FramePixels {
+    /// 8-bit palette indices plus the palette in effect, already scaled from
+    /// VGA 6-bit to full 8-bit range.
+    Indexed {
+        pixels: Vec<u8>,
+        palette: Vec<[u8; 3]>,
+    },
+    /// 15-bit `0rrrrrgg gggbbbbb` pixels (5 bits per channel).
+    HiColor { pixels: Vec<u16> },
+}
+
+impl Frame {
+    /// Convert the frame to packed RGB888 bytes, row-major. Indexed pixels
+    /// with no palette entry come out black.
+    pub fn to_rgb888(&self) -> Vec<u8> {
+        match &self.pixels {
+            FramePixels::Indexed { pixels, palette } => pixels
+                .iter()
+                .flat_map(|&i| palette.get(usize::from(i)).copied().unwrap_or([0, 0, 0]))
+                .collect(),
+            FramePixels::HiColor { pixels } => pixels
+                .iter()
+                .flat_map(|&p| {
+                    // scale each 5-bit channel to 8 bits
+                    let scale = |v: u16| (v << 3 | v >> 2) as u8;
+                    [scale(p >> 10 & 31), scale(p >> 5 & 31), scale(p & 31)]
+                })
+                .collect(),
+        }
+    }
+}
+
+/// Stateful decoder for a movie's video stream.
+///
+/// Feed it every VQFL chunk ([`FrameDecoder::process_vqfl`]) and VQFR chunk
+/// ([`FrameDecoder::decode_frame`]) in file order; it maintains the codebook
+/// (including accumulation of partial codebooks across `cbparts` frames),
+/// the palette, and the previous frame that HiColor movies update
+/// differentially.
+pub struct FrameDecoder {
+    version: VQAVersion,
+    hicolor: bool,
+    width: usize,
+    height: usize,
+    block_w: usize,
+    block_h: usize,
+    blocks_x: usize,
+    blocks_y: usize,
+    /// the HiVal byte marking a solid-color block in a v2 pointer table
+    fill_sentinel: u8,
+    max_codebook_bytes: usize,
+    /// parts making up one full codebook (0 = full codebooks only)
+    cbparts: usize,
+    /// current codebook - 8-bit movies store palette indices...
+    codebook8: Vec<u8>,
+    /// ...HiColor movies 15-bit pixels
+    codebook16: Vec<u16>,
+    /// staged partial codebook data and how many parts are in
+    parts: Vec<u8>,
+    parts_count: usize,
+    parts_compressed: bool,
+    palette: Vec<[u8; 3]>,
+    frame8: Vec<u8>,
+    frame16: Vec<u16>,
+}
+
+impl FrameDecoder {
+    pub fn new(header: &VQAHeader) -> Result<FrameDecoder, Error> {
+        let block_w = usize::from(header.block_width);
+        let block_h = usize::from(header.block_height);
+        if block_w == 0 || block_h == 0 {
+            return Err(Error::Video("block size is zero"));
+        }
+
+        let width = usize::from(header.width);
+        let height = usize::from(header.height);
+        if width * height > MAX_FRAME_PIXELS {
+            return Err(Error::TooLarge("frame dimensions"));
+        }
+
+        let hicolor = header.is_hicolor();
+        let max_blocks = match header.maxblocks {
+            0 => 0xff00,
+            n => usize::from(n),
+        };
+        let entry_bytes = block_w * block_h * if hicolor { 2 } else { 1 };
+        let max_codebook_bytes = (max_blocks * entry_bytes).min(MAX_FRAME_PIXELS);
+
+        Ok(FrameDecoder {
+            version: header.version,
+            hicolor,
+            width,
+            height,
+            block_w,
+            block_h,
+            blocks_x: width / block_w,
+            blocks_y: height / block_h,
+            // normal movies hold at most 0x0f00 codebook entries, so 0x0f
+            // can flag a fill; the hi-res movies use 0xff instead
+            fill_sentinel: if header.maxblocks > 0x0f00 {
+                0xff
+            } else {
+                0x0f
+            },
+            max_codebook_bytes,
+            cbparts: usize::from(header.cbparts),
+            codebook8: Vec::new(),
+            codebook16: Vec::new(),
+            parts: Vec::new(),
+            parts_count: 0,
+            parts_compressed: false,
+            palette: Vec::new(),
+            frame8: if hicolor {
+                Vec::new()
+            } else {
+                vec![0; width * height]
+            },
+            frame16: if hicolor {
+                vec![0; width * height]
+            } else {
+                Vec::new()
+            },
+        })
+    }
+
+    /// Process a VQFL chunk's payload: codebook (and palette) sub-chunks
+    /// that apply to the following frames.
+    pub fn process_vqfl(&mut self, mut data: &[u8]) -> Result<(), Error> {
+        while !data.is_empty() {
+            let (rest, chunk) = raw_chunk(data).map_err(|_| Error::Parse)?;
+            data = rest;
+            self.side_chunk(&chunk)?;
+        }
+        Ok(())
+    }
+
+    /// Decode one VQFR chunk's payload into the next frame.
+    pub fn decode_frame(&mut self, mut data: &[u8]) -> Result<Frame, Error> {
+        while !data.is_empty() {
+            let (rest, chunk) = raw_chunk(data).map_err(|_| Error::Parse)?;
+            data = rest;
+            match &chunk.id {
+                b"VPT0" => self.render_vpt(chunk.data)?,
+                b"VPTZ" => {
+                    let table = lcw::decompress(chunk.data, self.pointer_table_len())?;
+                    self.render_vpt(&table)?;
+                }
+                b"VPTR" => self.render_vptr(chunk.data)?,
+                b"VPRZ" => {
+                    // a command stream has no fixed size; bound it generously
+                    let cap = self.blocks_x * self.blocks_y * 8 + 256;
+                    let stream = lcw::decompress(chunk.data, cap)?;
+                    self.render_vptr(&stream)?;
+                }
+                _ => self.side_chunk(&chunk)?,
+            }
+        }
+
+        // a codebook completed by this frame's part takes effect only after
+        // the frame is drawn
+        self.finish_codebook_parts()?;
+
+        Ok(self.snapshot())
+    }
+
+    /// Handle the non-pointer sub-chunks: codebooks, codebook parts, and
+    /// palettes. Anything unrecognized is skipped.
+    fn side_chunk(&mut self, chunk: &RawChunk<'_>) -> Result<(), Error> {
+        match &chunk.id {
+            b"CBF0" => self.set_codebook(chunk.data.to_vec()),
+            b"CBFZ" => {
+                let data = lcw::decompress(chunk.data, self.max_codebook_bytes)?;
+                self.set_codebook(data)
+            }
+            b"CBP0" | b"CBPZ" => self.stage_codebook_part(chunk),
+            b"CPL0" => self.set_palette(chunk.data),
+            b"CPLZ" => {
+                let data = lcw::decompress(chunk.data, 256 * 3)?;
+                self.set_palette(&data)
+            }
+            _ => Ok(()),
+        }
+    }
+
+    fn entry_len(&self) -> usize {
+        self.block_w * self.block_h
+    }
+
+    fn pointer_table_len(&self) -> usize {
+        self.blocks_x * self.blocks_y * 2
+    }
+
+    fn set_codebook(&mut self, bytes: Vec<u8>) -> Result<(), Error> {
+        if bytes.len() > self.max_codebook_bytes {
+            return Err(Error::TooLarge("codebook"));
+        }
+        let entry_bytes = self.entry_len() * if self.hicolor { 2 } else { 1 };
+        if !bytes.len().is_multiple_of(entry_bytes) {
+            return Err(Error::Video(
+                "codebook size is not a multiple of the block size",
+            ));
+        }
+        if self.hicolor {
+            self.codebook16 = bytes
+                .chunks_exact(2)
+                .map(|p| u16::from_le_bytes([p[0], p[1]]))
+                .collect();
+        } else {
+            self.codebook8 = bytes;
+        }
+        Ok(())
+    }
+
+    fn stage_codebook_part(&mut self, chunk: &RawChunk<'_>) -> Result<(), Error> {
+        let compressed = chunk.id[3] == b'Z';
+        if self.parts_count == 0 {
+            self.parts.clear();
+            self.parts_compressed = compressed;
+        } else if compressed != self.parts_compressed {
+            return Err(Error::Video("mixed CBP0/CBPZ parts"));
+        }
+        if self.parts.len() + chunk.data.len() > self.max_codebook_bytes {
+            return Err(Error::TooLarge("codebook parts"));
+        }
+        self.parts.extend_from_slice(chunk.data);
+        self.parts_count += 1;
+        Ok(())
+    }
+
+    /// Swap in the codebook accumulated from CBP? parts once `cbparts`
+    /// frames have contributed one part each.
+    fn finish_codebook_parts(&mut self) -> Result<(), Error> {
+        if self.cbparts == 0 || self.parts_count < self.cbparts {
+            return Ok(());
+        }
+        let staged = std::mem::take(&mut self.parts);
+        self.parts_count = 0;
+        let bytes = if self.parts_compressed {
+            lcw::decompress(&staged, self.max_codebook_bytes)?
+        } else {
+            staged
+        };
+        self.set_codebook(bytes)
+    }
+
+    fn set_palette(&mut self, data: &[u8]) -> Result<(), Error> {
+        if !data.len().is_multiple_of(3) || data.len() > 256 * 3 {
+            return Err(Error::Video("palette size"));
+        }
+        self.palette = data
+            .chunks_exact(3)
+            .map(|rgb| {
+                // scale VGA 6-bit values to full 8-bit range
+                let scale = |v: u8| (v & 0x3f) << 2 | (v & 0x3f) >> 4;
+                [scale(rgb[0]), scale(rgb[1]), scale(rgb[2])]
+            })
+            .collect();
+        Ok(())
+    }
+
+    /// Draw a full 8-bit frame from a (decompressed) VPT? pointer table.
+    fn render_vpt(&mut self, table: &[u8]) -> Result<(), Error> {
+        if self.hicolor {
+            return Err(Error::Video("VPT? pointer table in a HiColor movie"));
+        }
+        let blocks = self.blocks_x * self.blocks_y;
+        if table.len() != blocks * 2 {
+            return Err(Error::Video("pointer table size mismatch"));
+        }
+        for by in 0..self.blocks_y {
+            for bx in 0..self.blocks_x {
+                let i = by * self.blocks_x + bx;
+                match self.version {
+                    // v1: interleaved 16-bit entries; 0xff flags a fill with
+                    // color 255-LoVal, indexes are stored premultiplied by 8
+                    VQAVersion::One => {
+                        let (lo, hi) = (table[i * 2], table[i * 2 + 1]);
+                        if hi == 0xff {
+                            self.fill_block(bx, by, 255 - lo);
+                        } else {
+                            let index = (usize::from(hi) << 8 | usize::from(lo)) / 8;
+                            self.copy_block8(bx, by, index)?;
+                        }
+                    }
+                    // v2: table split into a LoVal half and a HiVal half
+                    _ => {
+                        let (lo, hi) = (table[i], table[blocks + i]);
+                        if hi == self.fill_sentinel {
+                            self.fill_block(bx, by, lo);
+                        } else {
+                            self.copy_block8(bx, by, usize::from(hi) << 8 | usize::from(lo))?;
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Apply a (decompressed) HiColor VPTR command stream to the previous
+    /// frame. Commands walk the frame's blocks row-major.
+    fn render_vptr(&mut self, stream: &[u8]) -> Result<(), Error> {
+        if !self.hicolor {
+            return Err(Error::Video("VPTR pointer stream in an 8-bit movie"));
+        }
+        let mut pos = 0; // current block, row-major
+        let mut sp = 0;
+        while sp < stream.len() {
+            let val = match stream.get(sp..sp + 2) {
+                Some(b) => u16::from_le_bytes([b[0], b[1]]),
+                None => return Err(Error::Video("dangling byte in pointer stream")),
+            };
+            sp += 2;
+
+            let run_count = usize::from(val >> 8 & 0x1f) + 1;
+            match val >> 13 {
+                // skip blocks (leave them unchanged)
+                0b000 => pos += usize::from(val & 0x1fff),
+                // write one of the first 256 blocks 2*(run+1) times
+                0b001 => {
+                    for _ in 0..run_count * 2 {
+                        self.write_block16(&mut pos, usize::from(val & 0xff), false)?;
+                    }
+                }
+                // write a block, then 2*(run+1) more indexed by stream bytes
+                0b010 => {
+                    self.write_block16(&mut pos, usize::from(val & 0xff), false)?;
+                    for _ in 0..run_count * 2 {
+                        let index = *stream
+                            .get(sp)
+                            .ok_or(Error::Video("truncated pointer stream"))?;
+                        sp += 1;
+                        self.write_block16(&mut pos, usize::from(index), false)?;
+                    }
+                }
+                // write a single block, optionally skipping alpha pixels
+                0b011 => self.write_block16(&mut pos, usize::from(val & 0x1fff), false)?,
+                0b100 => self.write_block16(&mut pos, usize::from(val & 0x1fff), true)?,
+                // write a block N times, N from the next stream byte,
+                // optionally skipping alpha pixels
+                0b101 | 0b110 => {
+                    let count = *stream
+                        .get(sp)
+                        .ok_or(Error::Video("truncated pointer stream"))?;
+                    sp += 1;
+                    let alpha = val >> 13 == 0b110;
+                    for _ in 0..count {
+                        self.write_block16(&mut pos, usize::from(val & 0x1fff), alpha)?;
+                    }
+                }
+                _ => return Err(Error::Video("unknown pointer stream command")),
+            }
+        }
+        Ok(())
+    }
+
+    /// Write codebook entry `index` at block position `pos` (advancing it).
+    /// With `alpha_skip`, pixels whose alpha bit is set keep their previous
+    /// value (Blade Runner overlay movies).
+    fn write_block16(
+        &mut self,
+        pos: &mut usize,
+        index: usize,
+        alpha_skip: bool,
+    ) -> Result<(), Error> {
+        if *pos >= self.blocks_x * self.blocks_y {
+            return Err(Error::Video("pointer stream writes past the frame"));
+        }
+        let entry = self.entry_len();
+        if (index + 1) * entry > self.codebook16.len() {
+            return Err(Error::Video("block index outside the codebook"));
+        }
+        let (bx, by) = (*pos % self.blocks_x, *pos / self.blocks_x);
+        for row in 0..self.block_h {
+            let src = index * entry + row * self.block_w;
+            let dst = (by * self.block_h + row) * self.width + bx * self.block_w;
+            for col in 0..self.block_w {
+                let pixel = self.codebook16[src + col];
+                if !(alpha_skip && pixel & 0x8000 != 0) {
+                    self.frame16[dst + col] = pixel;
+                }
+            }
+        }
+        *pos += 1;
+        Ok(())
+    }
+
+    /// Copy codebook entry `index` into the 8-bit frame at block (bx, by).
+    fn copy_block8(&mut self, bx: usize, by: usize, index: usize) -> Result<(), Error> {
+        let entry = self.entry_len();
+        if (index + 1) * entry > self.codebook8.len() {
+            return Err(Error::Video("block index outside the codebook"));
+        }
+        for row in 0..self.block_h {
+            let src = index * entry + row * self.block_w;
+            let dst = (by * self.block_h + row) * self.width + bx * self.block_w;
+            self.frame8[dst..dst + self.block_w]
+                .copy_from_slice(&self.codebook8[src..src + self.block_w]);
+        }
+        Ok(())
+    }
+
+    /// Fill block (bx, by) of the 8-bit frame with a solid color.
+    fn fill_block(&mut self, bx: usize, by: usize, color: u8) {
+        for row in 0..self.block_h {
+            let dst = (by * self.block_h + row) * self.width + bx * self.block_w;
+            for pixel in &mut self.frame8[dst..dst + self.block_w] {
+                *pixel = color;
+            }
+        }
+    }
+
+    fn snapshot(&self) -> Frame {
+        Frame {
+            width: self.width,
+            height: self.height,
+            pixels: if self.hicolor {
+                FramePixels::HiColor {
+                    pixels: self.frame16.clone(),
+                }
+            } else {
+                FramePixels::Indexed {
+                    pixels: self.frame8.clone(),
+                    palette: self.palette.clone(),
+                }
+            },
+        }
+    }
+}
+
+#[cfg(test)]
+// binary literals below group digits by field (prefix_run_index), not by four
+#[allow(clippy::unusual_byte_groupings)]
+mod tests {
+    use super::*;
+    use crate::parser::VQAFlags;
+
+    /// An 8x4 v2 movie with 4x2 blocks: 2x2 = 4 blocks per frame.
+    fn v2_header() -> VQAHeader {
+        VQAHeader {
+            version: VQAVersion::Two,
+            flags: VQAFlags::empty(),
+            num_frames: 3,
+            width: 8,
+            height: 4,
+            block_width: 4,
+            block_height: 2,
+            frame_rate: 15,
+            cbparts: 0,
+            colors: 256,
+            maxblocks: 0x0f00,
+            unk1: 0,
+            unk2: 0,
+            freq: 22050,
+            channels: 1,
+            bits: 16,
+            unk3: 0,
+            unk4: 0,
+            max_cbfz_size: 0,
+            unk5: 0,
+        }
+    }
+
+    fn hicolor_header() -> VQAHeader {
+        VQAHeader {
+            version: VQAVersion::Three,
+            colors: 0,
+            channels: 2,
+            ..v2_header()
+        }
+    }
+
+    /// Wrap `data` in a chunk header with the given ID.
+    fn chunk(id: &str, data: &[u8]) -> Vec<u8> {
+        let mut out = id.as_bytes().to_vec();
+        out.extend((data.len() as u32).to_be_bytes());
+        out.extend(data);
+        if data.len() % 2 == 1 {
+            out.push(0);
+        }
+        out
+    }
+
+    #[test]
+    fn renders_v2_frame_from_codebook_palette_and_pointers() {
+        let mut decoder = FrameDecoder::new(&v2_header()).unwrap();
+
+        // two codebook entries: blocks of pixel values 0..8 and 10..18
+        let codebook: Vec<u8> = (0..8).chain(10..18).collect();
+        // two colors; raw VGA 6-bit values
+        let palette = [0x3f, 0, 0, 0, 0x20, 0];
+        // blocks: entry 0, entry 1, fill with color 7, entry 0
+        let table = [0u8, 1, 7, 0, /* hi half */ 0, 0, 0x0f, 0];
+
+        let mut vqfr = chunk("CBF0", &codebook);
+        vqfr.extend(chunk("CPL0", &palette));
+        vqfr.extend(chunk("VPT0", &table));
+
+        let frame = decoder.decode_frame(&vqfr).unwrap();
+        match &frame.pixels {
+            FramePixels::Indexed { pixels, palette } => {
+                #[rustfmt::skip]
+                assert_eq!(pixels, &vec![
+                    0,  1,  2,  3,   10, 11, 12, 13,
+                    4,  5,  6,  7,   14, 15, 16, 17,
+                    7,  7,  7,  7,    0,  1,  2,  3,
+                    7,  7,  7,  7,    4,  5,  6,  7,
+                ]);
+                assert_eq!(palette[0], [0xff, 0, 0]);
+                assert_eq!(palette[1], [0, 0x82, 0]);
+            }
+            _ => panic!("expected an indexed frame"),
+        }
+    }
+
+    #[test]
+    fn accumulates_codebook_parts_and_swaps_after_the_carrying_frame() {
+        let mut header = v2_header();
+        header.cbparts = 2;
+        let mut decoder = FrameDecoder::new(&header).unwrap();
+
+        let old_codebook: Vec<u8> = vec![1; 8];
+        let new_first: Vec<u8> = vec![2; 8];
+        let new_second: Vec<u8> = vec![3; 8];
+        let table = [0u8, 0, 0, 0, 0, 0, 0, 0]; // every block uses entry 0
+
+        // frame 1: full codebook + first part of the next one
+        let mut vqfr = chunk("CBF0", &old_codebook);
+        vqfr.extend(chunk("CBP0", &new_first));
+        vqfr.extend(chunk("VPT0", &table));
+        let frame = decoder.decode_frame(&vqfr).unwrap();
+        assert!(matches!(&frame.pixels, FramePixels::Indexed { pixels, .. } if pixels[0] == 1));
+
+        // frame 2 carries the last part; it still draws with the old codebook
+        let mut vqfr = chunk("CBP0", &new_second);
+        vqfr.extend(chunk("VPT0", &table));
+        let frame = decoder.decode_frame(&vqfr).unwrap();
+        assert!(matches!(&frame.pixels, FramePixels::Indexed { pixels, .. } if pixels[0] == 1));
+
+        // frame 3 uses the swapped-in codebook (entry 0 comes from part one)
+        let frame = decoder.decode_frame(&chunk("VPT0", &table)).unwrap();
+        assert!(matches!(&frame.pixels, FramePixels::Indexed { pixels, .. } if pixels[0] == 2));
+    }
+
+    #[test]
+    fn decompresses_vptz_pointer_tables() {
+        let mut decoder = FrameDecoder::new(&v2_header()).unwrap();
+
+        let codebook: Vec<u8> = (0..8).collect();
+        let table = [0u8, 0, 0, 0, 0, 0, 0, 0];
+        // LCW: one literal run with the whole table, then the end marker
+        let mut compressed = vec![0x80 | table.len() as u8];
+        compressed.extend(table);
+        compressed.push(0x80);
+
+        let mut vqfr = chunk("CBF0", &codebook);
+        vqfr.extend(chunk("VPTZ", &compressed));
+        let frame = decoder.decode_frame(&vqfr).unwrap();
+        // every block draws entry 0; pixel (7, 1) is column 3, row 1 of the
+        // second block in the top row
+        assert!(matches!(&frame.pixels, FramePixels::Indexed { pixels, .. }
+            if pixels[7] == 3 && pixels[15] == 7));
+    }
+
+    #[test]
+    fn renders_hicolor_vptr_commands_differentially() {
+        let mut decoder = FrameDecoder::new(&hicolor_header()).unwrap();
+
+        // two entries of 15-bit pixels, as little-endian bytes
+        let mut codebook = Vec::new();
+        for pixel in [0x7fffu16; 8].iter().chain([0x0300u16; 8].iter()) {
+            codebook.extend(&pixel.to_le_bytes());
+        }
+
+        // frame 1: write block 1, then block 0 three times (prefix 101)
+        let mut stream = Vec::new();
+        stream.extend(&(0b011_0000000000001u16).to_le_bytes());
+        stream.extend(&(0b101_0000000000000u16).to_le_bytes());
+        stream.push(3);
+
+        let mut vqfr = chunk("CBF0", &codebook);
+        vqfr.extend(chunk("VPTR", &stream));
+        let frame = decoder.decode_frame(&vqfr).unwrap();
+        let FramePixels::HiColor { pixels } = &frame.pixels else {
+            panic!("expected a hicolor frame");
+        };
+        assert_eq!(pixels[0], 0x0300);
+        assert_eq!(pixels[4], 0x7fff);
+        assert_eq!(pixels[7], 0x7fff);
+
+        // frame 2: skip 3 blocks, rewrite only the last with block 1;
+        // the first three keep their previous contents
+        let mut stream = Vec::new();
+        stream.extend(&(0b000_0000000000011u16).to_le_bytes());
+        stream.extend(&(0b011_0000000000001u16).to_le_bytes());
+        let frame = decoder.decode_frame(&chunk("VPTR", &stream)).unwrap();
+        let FramePixels::HiColor { pixels } = &frame.pixels else {
+            panic!("expected a hicolor frame");
+        };
+        assert_eq!(pixels[0], 0x0300); // block 0, unchanged from frame 1
+        assert_eq!(pixels[4], 0x7fff); // block 1, unchanged from frame 1
+        assert_eq!(pixels[2 * 8 + 4], 0x0300); // block 3, rewritten
+    }
+
+    #[test]
+    fn hicolor_run_and_indexed_write_commands() {
+        // a 16x4 movie: 4x2 = 8 blocks, room for the five writes below
+        let mut header = hicolor_header();
+        header.width = 16;
+        let mut decoder = FrameDecoder::new(&header).unwrap();
+
+        let mut codebook = Vec::new();
+        for value in [1u16, 2, 3] {
+            for _ in 0..8 {
+                codebook.extend(&value.to_le_bytes());
+            }
+        }
+
+        // prefix 001: write entry 0 at (run+1)*2 = 2 blocks; then prefix
+        // 010: write entry 1, then 2 more entries from stream bytes (2, 2)
+        let mut stream = Vec::new();
+        stream.extend(&(0b001_00000_00000000u16).to_le_bytes());
+        stream.extend(&(0b010_00000_00000001u16).to_le_bytes());
+        stream.push(2);
+        stream.push(2);
+
+        let mut vqfr = chunk("CBF0", &codebook);
+        vqfr.extend(chunk("VPTR", &stream));
+        let frame = decoder.decode_frame(&vqfr).unwrap();
+        let FramePixels::HiColor { pixels } = &frame.pixels else {
+            panic!("expected a hicolor frame");
+        };
+        // blocks 0-4 hold entries 0, 0, 1, 2, 2; blocks 5-7 stay black
+        assert_eq!(pixels[0], 1); // block 0
+        assert_eq!(pixels[4], 1); // block 1
+        assert_eq!(pixels[8], 2); // block 2
+        assert_eq!(pixels[12], 3); // block 3
+        assert_eq!(pixels[2 * 16], 3); // block 4, second block row
+        assert_eq!(pixels[2 * 16 + 4], 0); // block 5, never written
+    }
+
+    #[test]
+    fn rejects_block_indices_outside_the_codebook() {
+        let mut decoder = FrameDecoder::new(&v2_header()).unwrap();
+        let codebook: Vec<u8> = (0..8).collect(); // one entry
+        let table = [0u8, 1, 0, 0, 0, 0, 0, 0]; // block 1 wants entry 1
+
+        let mut vqfr = chunk("CBF0", &codebook);
+        vqfr.extend(chunk("VPT0", &table));
+        assert_eq!(
+            decoder.decode_frame(&vqfr),
+            Err(Error::Video("block index outside the codebook"))
+        );
+    }
+
+    #[test]
+    fn rejects_unknown_pointer_stream_commands() {
+        let mut decoder = FrameDecoder::new(&hicolor_header()).unwrap();
+        let stream = (0b111_0000000000000u16).to_le_bytes();
+        assert_eq!(
+            decoder.decode_frame(&chunk("VPTR", &stream)),
+            Err(Error::Video("unknown pointer stream command"))
+        );
+    }
+}
