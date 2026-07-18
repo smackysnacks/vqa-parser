@@ -36,8 +36,12 @@ fuzz_target!(|data: &[u8]| {
     // Walk the container the way a real consumer does: FORM header, VQA
     // header, then FINF (scanning past any LINF/CINF chunks before it), and
     // finally the frame data each decoded FINF offset points at.
-    let Ok((rest, _)) = form_chunk(data) else { return };
-    let Ok((rest, _)) = vqa_header(rest) else { return };
+    let Ok((rest, _)) = form_chunk(data) else {
+        return;
+    };
+    let Ok((rest, _)) = vqa_header(rest) else {
+        return;
+    };
 
     let Some(finf_pos) = rest.windows(4).position(|w| w == b"FINF") else {
         return;

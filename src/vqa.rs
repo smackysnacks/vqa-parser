@@ -3,13 +3,13 @@
 //! chunk parsers, the padding rule, the FINF transforms, or the per-version
 //! stereo layouts.
 
-use nom::bytes::complete::tag;
 use nom::Parser;
+use nom::bytes::complete::tag;
 
-use crate::audio::{decompress, CodecState};
+use crate::audio::{CodecState, decompress};
 use crate::error::Error;
 use crate::parser::{
-    form_chunk, frame_info, raw_chunk, vqa_header, FrameInfo, RawChunk, VQAHeader, VQAVersion,
+    FrameInfo, RawChunk, VQAHeader, VQAVersion, form_chunk, frame_info, raw_chunk, vqa_header,
 };
 use crate::video::{Frame, FrameDecoder};
 

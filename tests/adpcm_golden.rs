@@ -6,8 +6,8 @@ use nom::bytes::complete::take_until;
 use nom::multi::many0;
 use nom::{IResult, Parser};
 
-use vqa_parser::audio::{decompress, CodecState};
-use vqa_parser::{snd2_chunk, SND2Chunk};
+use vqa_parser::audio::{CodecState, decompress};
+use vqa_parser::{SND2Chunk, snd2_chunk};
 
 fn next_snd2_chunk(input: &[u8]) -> IResult<&[u8], SND2Chunk<'_>> {
     let (input, _) = take_until("SND2").parse(input)?;

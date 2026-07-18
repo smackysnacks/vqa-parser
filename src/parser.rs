@@ -5,12 +5,12 @@ use std::convert::TryInto;
 
 use bitflags::bitflags;
 use nom::{
+    IResult, Parser,
     branch::alt,
     bytes::complete::{tag, take},
     combinator::{cond, map, map_opt, opt, value, verify},
     multi::count,
-    number::complete::{be_u32, le_u16, le_u32, le_u8},
-    IResult, Parser,
+    number::complete::{be_u32, le_u8, le_u16, le_u32},
 };
 
 /// Take `size` bytes of chunk payload, also consuming the pad byte that

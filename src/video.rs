@@ -9,7 +9,7 @@
 
 use crate::error::Error;
 use crate::lcw;
-use crate::parser::{raw_chunk, RawChunk, VQAHeader, VQAVersion};
+use crate::parser::{RawChunk, VQAHeader, VQAVersion, raw_chunk};
 
 /// Sanity limit on the pixels in one frame and on codebook bytes, so a
 /// malformed header cannot demand gigabyte allocations.

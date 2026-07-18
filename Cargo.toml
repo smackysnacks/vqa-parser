@@ -2,7 +2,7 @@
 name = "vqa-parser"
 version = "0.2.0"
 authors = ["Mack Stump <mack@mackstump.com>"]
-edition = "2018"
+edition = "2024"
 
 [dependencies]
 bitflags = "2"

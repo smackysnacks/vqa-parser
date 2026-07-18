@@ -1,7 +1,7 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use vqa_parser::audio::{decompress, CodecState};
+use vqa_parser::audio::{CodecState, decompress};
 
 fuzz_target!(|data: &[u8]| {
     let (first, second) = data.split_at(data.len() / 2);

@@ -1,10 +1,10 @@
 //! Integration test: parse the container structures of the bundled
 //! wwlogo.vqa and verify them against the file's known layout.
 
-use nom::bytes::complete::{tag, take_until};
 use nom::Parser;
+use nom::bytes::complete::{tag, take_until};
 
-use vqa_parser::{finf_chunk, form_chunk, vqa_header, VQAFlags, VQAVersion};
+use vqa_parser::{VQAFlags, VQAVersion, finf_chunk, form_chunk, vqa_header};
 
 #[test]
 fn parses_wwlogo_header_and_frame_index() {
