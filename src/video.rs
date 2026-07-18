@@ -217,16 +217,15 @@ impl FrameDecoder {
         self.blocks_x * self.blocks_y * 2
     }
 
-    fn set_codebook(&mut self, bytes: Vec<u8>) -> Result<(), Error> {
+    fn set_codebook(&mut self, mut bytes: Vec<u8>) -> Result<(), Error> {
         if bytes.len() > self.max_codebook_bytes {
             return Err(Error::TooLarge("codebook"));
         }
+        // Westwood's compressor sometimes leaves 1-2 stray bytes after the
+        // last entry (CBFZ chunks in retail HiColor movies); drop the partial
+        // entry instead of rejecting the codebook, like the original players
         let entry_bytes = self.entry_len() * if self.hicolor { 2 } else { 1 };
-        if !bytes.len().is_multiple_of(entry_bytes) {
-            return Err(Error::Video(
-                "codebook size is not a multiple of the block size",
-            ));
-        }
+        bytes.truncate(bytes.len() - bytes.len() % entry_bytes);
         if self.hicolor {
             self.codebook16 = bytes
                 .chunks_exact(2)
@@ -395,7 +394,11 @@ impl FrameDecoder {
         }
         let entry = self.entry_len();
         if (index + 1) * entry > self.codebook16.len() {
-            return Err(Error::Video("block index outside the codebook"));
+            // retail movies contain the occasional stray command word whose
+            // index points past the codebook (the original players read out
+            // of bounds and drew garbage); keep the block's previous pixels
+            *pos += 1;
+            return Ok(());
         }
         let (bx, by) = (*pos % self.blocks_x, *pos / self.blocks_x);
         for row in 0..self.block_h {
@@ -667,6 +670,27 @@ mod tests {
     }
 
     #[test]
+    fn drops_stray_bytes_after_the_last_codebook_entry() {
+        let mut decoder = FrameDecoder::new(&v2_header()).unwrap();
+        // one full entry plus two stray trailing bytes, as retail HiColor
+        // movies contain; the partial entry must not become addressable
+        let codebook: Vec<u8> = (0..8).chain([9, 9]).collect();
+        let table = [0u8, 0, 0, 0, 0, 0, 0, 0];
+
+        let mut vqfr = chunk("CBF0", &codebook);
+        vqfr.extend(chunk("VPT0", &table));
+        let frame = decoder.decode_frame(&vqfr).unwrap();
+        assert!(matches!(&frame.pixels, FramePixels::Indexed { pixels, .. }
+            if pixels[0] == 0 && pixels[15] == 7));
+
+        let table = [0u8, 1, 0, 0, 0, 0, 0, 0]; // block 1 wants entry 1
+        assert_eq!(
+            decoder.decode_frame(&chunk("VPT0", &table)),
+            Err(Error::Video("block index outside the codebook"))
+        );
+    }
+
+    #[test]
     fn rejects_block_indices_outside_the_codebook() {
         let mut decoder = FrameDecoder::new(&v2_header()).unwrap();
         let codebook: Vec<u8> = (0..8).collect(); // one entry
@@ -678,6 +702,34 @@ mod tests {
             decoder.decode_frame(&vqfr),
             Err(Error::Video("block index outside the codebook"))
         );
+    }
+
+    #[test]
+    fn skips_hicolor_writes_with_indices_outside_the_codebook() {
+        let mut decoder = FrameDecoder::new(&hicolor_header()).unwrap();
+
+        let mut codebook = Vec::new();
+        for pixel in [0x0300u16; 8] {
+            codebook.extend(&pixel.to_le_bytes());
+        }
+
+        // write block 0, then a stray command indexing far past the
+        // codebook (as retail movies contain), then block 0 again
+        let mut stream = Vec::new();
+        stream.extend(&(0b011_0000000000000u16).to_le_bytes());
+        stream.extend(&(0b011_1111101010100u16).to_le_bytes());
+        stream.extend(&(0b011_0000000000000u16).to_le_bytes());
+
+        let mut vqfr = chunk("CBF0", &codebook);
+        vqfr.extend(chunk("VPTR", &stream));
+        let frame = decoder.decode_frame(&vqfr).unwrap();
+        let FramePixels::HiColor { pixels } = &frame.pixels else {
+            panic!("expected a hicolor frame");
+        };
+        // blocks 0 and 2 drawn, block 1 skipped but still advanced past
+        assert_eq!(pixels[0], 0x0300);
+        assert_eq!(pixels[4], 0); // untouched
+        assert_eq!(pixels[2 * 8], 0x0300);
     }
 
     #[test]
