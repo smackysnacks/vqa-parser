@@ -38,6 +38,10 @@ coverage:
 lint:
     cargo clippy --workspace --tests
 
+# Play a VQA movie in a window; scale is 1, 2, or 4
+play file scale="2":
+    cargo run --release --example player -- "{{file}}" "{{scale}}"
+
 # Fuzz a cargo-fuzz target (parser | adpcm | lcw); extra args go to libFuzzer, e.g. `just fuzz parser -max_total_time=60`
 fuzz target="parser" *args:
     #!/usr/bin/env bash

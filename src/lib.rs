@@ -32,8 +32,10 @@
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 //!
-//! Two runnable examples exercise the same API: `play` plays a movie's
-//! soundtrack and `dump_frames` writes every video frame out as PPM.
+//! Three runnable examples exercise the same API: `player` plays a movie
+//! (video in a window, soundtrack on the default audio device), `play` plays
+//! just the soundtrack, and `dump_frames` writes every video frame out as
+//! PPM.
 //!
 //! # Layers
 //!

@@ -10,3 +10,4 @@ nom = "8"
 
 [dev-dependencies]
 cpal = "0.18"
+minifb = "0.28"
