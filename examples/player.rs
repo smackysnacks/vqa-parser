@@ -1,9 +1,8 @@
 //! Play a Westwood VQA movie: video in a window, soundtrack on the default
-//! audio device. Space pauses, Esc or Q quits.
+//! audio device. Space pauses, Left/Right seek five seconds, Esc or Q quits.
 //!
 //! Usage: player <vqa file> [scale]      (scale: 1, 2, or 4; default 2)
 
-use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
@@ -18,8 +17,9 @@ use vqa_parser::{Frame, FramePixels, VQA};
 struct Audio {
     /// Dropping the stream stops playback.
     _stream: cpal::Stream,
-    /// Device frames output so far while unpaused.
-    consumed: Arc<AtomicUsize>,
+    /// Playback position in device frames. The callback advances it while
+    /// unpaused; seeking stores a new value.
+    position: Arc<AtomicUsize>,
     /// Length of the resampled soundtrack in device frames.
     total_frames: usize,
     /// Device sample rate.
@@ -30,7 +30,7 @@ struct Audio {
 /// wall time otherwise.
 enum Clock {
     Audio {
-        consumed: Arc<AtomicUsize>,
+        position: Arc<AtomicUsize>,
         rate: u32,
     },
     Wall {
@@ -44,8 +44,8 @@ impl Clock {
     /// Seconds of playback elapsed (frozen while paused).
     fn now(&self) -> f64 {
         match self {
-            Clock::Audio { consumed, rate } => {
-                consumed.load(Ordering::Relaxed) as f64 / f64::from(*rate)
+            Clock::Audio { position, rate } => {
+                position.load(Ordering::Relaxed) as f64 / f64::from(*rate)
             }
             Clock::Wall {
                 start,
@@ -56,6 +56,25 @@ impl Clock {
                 end.duration_since(*start)
                     .saturating_sub(*paused_accum)
                     .as_secs_f64()
+            }
+        }
+    }
+
+    /// Jump the clock to `t` seconds. For the audio clock this also moves
+    /// playback: the callback reads samples at the position stored here.
+    fn set(&mut self, t: f64) {
+        match self {
+            Clock::Audio { position, rate } => {
+                position.store((t * f64::from(*rate)) as usize, Ordering::Relaxed);
+            }
+            Clock::Wall {
+                start,
+                paused_accum,
+                paused_since,
+            } => {
+                let end = paused_since.unwrap_or_else(Instant::now);
+                *paused_accum = Duration::ZERO;
+                *start = end.checked_sub(Duration::from_secs_f64(t)).unwrap_or(end);
             }
         }
     }
@@ -127,7 +146,7 @@ fn main() {
     let audio = start_audio(&vqa, paused.clone());
     let mut clock = match &audio {
         Some(a) => Clock::Audio {
-            consumed: a.consumed.clone(),
+            position: a.position.clone(),
             rate: a.rate,
         },
         None => Clock::Wall {
@@ -158,6 +177,28 @@ fn main() {
             }
         }
 
+        // Left/Right seek five seconds back/forward; works while paused too.
+        let mut seek = 0.0;
+        if window.is_key_pressed(Key::Left, KeyRepeat::Yes) {
+            seek -= 5.0;
+        }
+        if window.is_key_pressed(Key::Right, KeyRepeat::Yes) {
+            seek += 5.0;
+        }
+        if seek != 0.0 {
+            let t = (clock.now() + seek).max(0.0);
+            clock.set(t);
+            // Frames build on the decoder state left by their predecessors,
+            // so a backward seek means decoding again from the start; the
+            // catch-up loop below does the rest. Seeking past the end just
+            // ends playback.
+            if ((t * fps) as usize) < next_frame {
+                frames = vqa.frames().expect("bad video header");
+                next_frame = 0;
+                video_done = false;
+            }
+        }
+
         // Decode every frame that has come due; draw only the newest. If the
         // loop stalled, this also catches video back up to the clock (the
         // intermediate decodes are mandatory anyway - they carry codebook
@@ -184,7 +225,7 @@ fn main() {
 
         let audio_done = audio
             .as_ref()
-            .is_none_or(|a| a.consumed.load(Ordering::Relaxed) >= a.total_frames);
+            .is_none_or(|a| a.position.load(Ordering::Relaxed) >= a.total_frames);
         if video_done && audio_done {
             break;
         }
@@ -255,17 +296,17 @@ fn start_audio(vqa: &VQA<'_>, paused: Arc<AtomicBool>) -> Option<Audio> {
 
     let samples = resample_stereo(&samples, vqa.header.sample_rate(), rate);
     let total_frames = samples.len() / 2;
-    let consumed = Arc::new(AtomicUsize::new(0));
+    let position = Arc::new(AtomicUsize::new(0));
 
     let stream = match supported.sample_format() {
         cpal::SampleFormat::F32 => {
-            build_stream::<f32>(&device, config, samples, consumed.clone(), paused)
+            build_stream::<f32>(&device, config, samples, position.clone(), paused)
         }
         cpal::SampleFormat::I16 => {
-            build_stream::<i16>(&device, config, samples, consumed.clone(), paused)
+            build_stream::<i16>(&device, config, samples, position.clone(), paused)
         }
         cpal::SampleFormat::U16 => {
-            build_stream::<u16>(&device, config, samples, consumed.clone(), paused)
+            build_stream::<u16>(&device, config, samples, position.clone(), paused)
         }
         format => {
             eprintln!("warning: playing without audio: unsupported sample format {format}");
@@ -286,27 +327,26 @@ fn start_audio(vqa: &VQA<'_>, paused: Arc<AtomicBool>) -> Option<Audio> {
 
     Some(Audio {
         _stream: stream,
-        consumed,
+        position,
         total_frames,
         rate,
     })
 }
 
-/// Build the output stream. Each device frame the callback pops one stereo
-/// sample pair and advances the shared position counter - the master clock
-/// for the video loop. While `paused` is set it emits silence without
-/// consuming or counting, so the clock freezes; once the queue runs dry it
-/// keeps counting through silence so a video tail longer than the soundtrack
-/// still gets paced.
+/// Build the output stream. Each device frame the callback reads the stereo
+/// sample pair at the shared position counter and advances it - the master
+/// clock for the video loop, and what seeking stores into. While `paused` is
+/// set it emits silence without advancing, so the clock freezes; past the end
+/// of the samples it keeps counting through silence so a video tail longer
+/// than the soundtrack still gets paced.
 fn build_stream<T: cpal::SizedSample + cpal::FromSample<i16>>(
     device: &cpal::Device,
     config: cpal::StreamConfig,
     samples: Vec<i16>,
-    consumed: Arc<AtomicUsize>,
+    position: Arc<AtomicUsize>,
     paused: Arc<AtomicBool>,
 ) -> Result<cpal::Stream, cpal::Error> {
     let channels = usize::from(config.channels);
-    let mut sampledata = VecDeque::from(samples);
 
     device.build_output_stream(
         config,
@@ -317,9 +357,9 @@ fn build_stream<T: cpal::SizedSample + cpal::FromSample<i16>>(
                 let (left, right) = if is_paused {
                     (0, 0)
                 } else {
-                    consumed.fetch_add(1, Ordering::Relaxed);
-                    match (sampledata.pop_front(), sampledata.pop_front()) {
-                        (Some(left), Some(right)) => (left, right),
+                    let pos = position.fetch_add(1, Ordering::Relaxed);
+                    match samples.get(pos * 2..pos * 2 + 2) {
+                        Some(&[left, right]) => (left, right),
                         _ => (0, 0),
                     }
                 };
