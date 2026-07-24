@@ -1,7 +1,7 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use vqa_parser::lcw;
+use vqa::lcw;
 
 fuzz_target!(|data: &[u8]| {
     // Decompression must fail cleanly on arbitrary input in every mode,

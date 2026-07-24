@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use minifb::{Key, KeyRepeat, Scale, Window, WindowOptions};
 
-use vqa_parser::{Frame, FramePixels, VQA};
+use vqa::{Frame, FramePixels, VQA};
 
 /// The audio side of playback: keeps the stream alive and exposes the
 /// position counter the video loop uses as its clock.

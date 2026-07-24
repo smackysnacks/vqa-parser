@@ -1,5 +1,5 @@
 [package]
-name = "vqa-parser"
+name = "vqa"
 version = "0.5.0"
 authors = ["Mack Stump <mack@mackstump.com>"]
 edition = "2024"

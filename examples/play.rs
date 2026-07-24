@@ -1,4 +1,4 @@
-use vqa_parser::VQA;
+use vqa::VQA;
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 

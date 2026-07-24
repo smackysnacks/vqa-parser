@@ -4,7 +4,7 @@
 use nom::Parser;
 use nom::bytes::complete::{tag, take_until};
 
-use vqa_parser::{VQAFlags, VQAVersion, finf_chunk, form_chunk, vqa_header};
+use vqa::{VQAFlags, VQAVersion, finf_chunk, form_chunk, vqa_header};
 
 #[test]
 fn parses_wwlogo_header_and_frame_index() {

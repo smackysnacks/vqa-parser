@@ -5,7 +5,7 @@
 use std::fs::File;
 use std::io::Write;
 
-use vqa_parser::VQA;
+use vqa::VQA;
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();

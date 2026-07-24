@@ -1,7 +1,7 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use vqa_parser::*;
+use vqa::*;
 
 fuzz_target!(|data: &[u8]| {
     // Every public parser must fail cleanly on arbitrary input.

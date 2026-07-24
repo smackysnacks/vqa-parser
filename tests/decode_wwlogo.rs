@@ -2,7 +2,7 @@
 //! all 130 video frames and the full soundtrack - and verify the output
 //! against known checksums, locking in decoder behavior across refactors.
 
-use vqa_parser::{FramePixels, VQA};
+use vqa::{FramePixels, VQA};
 
 const FNV_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
 

@@ -9,7 +9,7 @@
 //! and audio samples:
 //!
 //! ```no_run
-//! use vqa_parser::VQA;
+//! use vqa::VQA;
 //!
 //! let data = std::fs::read("movie.vqa")?;
 //! let vqa = VQA::parse(&data)?;
@@ -39,7 +39,7 @@
 //!
 //! # Layers
 //!
-//! - [`vqa`]: the high-level API above ([`VQA`], [`Chunks`], [`Frames`]).
+//! - [`movie`]: the high-level API above ([`VQA`], [`Chunks`], [`Frames`]).
 //! - [`parser`]: zero-copy nom parsers for the individual chunks, for
 //!   consumers that want to walk the container themselves.
 //! - [`video`]: [`FrameDecoder`], the stateful codebook/palette/frame
@@ -70,11 +70,11 @@
 pub use error::Error;
 pub use parser::*;
 pub use video::{Frame, FrameDecoder, FramePixels};
-pub use vqa::{Chunks, Frames, VQA};
+pub use movie::{Chunks, Frames, VQA};
 
 pub mod audio;
 pub mod error;
 pub mod lcw;
+pub mod movie;
 pub mod parser;
 pub mod video;
-pub mod vqa;

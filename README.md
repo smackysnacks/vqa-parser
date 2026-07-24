@@ -1,8 +1,8 @@
-# vqa-parser
+# vqa
 
 [![CI](https://github.com/smackysnacks/vqa-parser/actions/workflows/rust.yml/badge.svg)](https://github.com/smackysnacks/vqa-parser/actions/workflows/rust.yml)
-[![crates.io](https://img.shields.io/crates/v/vqa-parser.svg)](https://crates.io/crates/vqa-parser)
-[![docs.rs](https://img.shields.io/docsrs/vqa-parser)](https://docs.rs/vqa-parser)
+[![crates.io](https://img.shields.io/crates/v/vqa.svg)](https://crates.io/crates/vqa)
+[![docs.rs](https://img.shields.io/docsrs/vqa)](https://docs.rs/vqa)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 A parser and decoder for Westwood Studios' VQA (Vector Quantized Animation)
@@ -25,7 +25,7 @@ untrusted data (see `fuzz/`).
 ## Quick start
 
 ```rust
-use vqa_parser::VQA;
+use vqa::VQA;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let data = std::fs::read("movie.vqa")?;
@@ -54,7 +54,7 @@ For consumers that want to walk the container themselves, the `parser`
 module exposes zero-copy [nom](https://crates.io/crates/nom) parsers for
 every chunk type, with `lcw` (LCW/"Format80" decompression), `video`
 (`FrameDecoder`), and `audio` (IMA ADPCM) as the decoding layers underneath.
-See the [API docs](https://docs.rs/vqa-parser) for the full tour.
+See the [API docs](https://docs.rs/vqa) for the full tour.
 
 ## Examples
 
