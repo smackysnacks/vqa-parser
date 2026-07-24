@@ -68,9 +68,9 @@
 #![warn(missing_docs)]
 
 pub use error::Error;
+pub use movie::{Chunks, Frames, VQA};
 pub use parser::*;
 pub use video::{Frame, FrameDecoder, FramePixels};
-pub use movie::{Chunks, Frames, VQA};
 
 pub mod audio;
 pub mod error;
