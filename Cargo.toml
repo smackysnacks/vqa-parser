@@ -1,10 +1,12 @@
 [package]
 name = "vqa"
-version = "0.5.0"
+version = "0.5.1"
 authors = ["Mack Stump <mack@mackstump.com>"]
 edition = "2024"
 description = "Parser and decoder for Westwood Studios' VQA (Vector Quantized Animation) full-motion-video format"
-repository = "https://github.com/smackysnacks/vqa-parser"
+homepage = "https://github.com/smackysnacks/vqa"
+repository = "https://github.com/smackysnacks/vqa"
+documentation = "https://docs.rs/vqa/"
 license = "MIT"
 readme = "README.md"
 keywords = ["vqa", "westwood", "parser", "video", "adpcm"]
