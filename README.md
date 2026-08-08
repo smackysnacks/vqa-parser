@@ -10,6 +10,8 @@ format — the full-motion-video format of Westwood's 90s games, including
 Command & Conquer, Red Alert, Lands of Lore, Dune 2000, Blade Runner,
 Tiberian Sun, and Nox.
 
+![Playing a VQA movie with the player example](assets/demo.jpg)
+
 ## Format support
 
 | Area      | Coverage                                                                                        |
